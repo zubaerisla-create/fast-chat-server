@@ -47,7 +47,15 @@ app.get("/health", (req, res) => {
 });
 
 // ─── Uploaded files (chat media, avatars, voice messages) ─────────────────────
-app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "30d", immutable: true, index: false }));
+// "private" keeps CDNs (Cloudflare) from caching user files, so a deleted file
+// stops being reachable right away; the app may still cache it on the device.
+app.use(
+  "/uploads",
+  express.static(UPLOAD_DIR, {
+    index: false,
+    setHeaders: (res) => res.setHeader("Cache-Control", "private, max-age=2592000, immutable"),
+  })
+);
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
 app.use("/api/auth", authRoutes);
