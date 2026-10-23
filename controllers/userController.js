@@ -1,6 +1,5 @@
 const User = require("../models/User");
-const cloudinary = require("../config/cloudinary");
-const streamifier = require("streamifier");
+const { saveFile, deleteFileByUrl } = require("../utils/storage");
 const { isValidExpoPushToken } = require("../services/pushNotificationService");
 
 /**
@@ -9,9 +8,7 @@ const { isValidExpoPushToken } = require("../services/pushNotificationService");
  */
 const getAllUsers = async (req, res, next) => {
   try {
-    const users = await User.find({ _id: { $ne: req.user._id } }).select(
-      "-password"
-    );
+    const users = await User.listExcept(req.user._id);
 
     res.status(200).json({ success: true, count: users.length, users });
   } catch (error) {
@@ -34,12 +31,7 @@ const searchUsers = async (req, res, next) => {
         .json({ success: false, message: "Search query is required." });
     }
 
-    const regex = new RegExp(query.trim(), "i"); // Case-insensitive regex
-
-    const users = await User.find({
-      _id: { $ne: req.user._id },
-      $or: [{ username: regex }, { email: regex }],
-    }).select("username email avatar isOnline lastSeen");
+    const users = await User.search(req.user._id, query.trim());
 
     res.status(200).json({ success: true, count: users.length, users });
   } catch (error) {
@@ -53,9 +45,7 @@ const searchUsers = async (req, res, next) => {
  */
 const getUserById = async (req, res, next) => {
   try {
-    const user = await User.findById(req.params.id).select(
-      "username email avatar isOnline lastSeen createdAt"
-    );
+    const user = await User.findById(req.params.id);
 
     if (!user) {
       return res
@@ -63,7 +53,7 @@ const getUserById = async (req, res, next) => {
         .json({ success: false, message: "User not found." });
     }
 
-    res.status(200).json({ success: true, user });
+    res.status(200).json({ success: true, user: User.toPublic(user) });
   } catch (error) {
     next(error);
   }
@@ -80,48 +70,42 @@ const updateProfile = async (req, res, next) => {
     const { username } = req.body;
     const updates = {};
 
-    if (username) updates.username = username;
+    if (username && username.trim() !== req.user.username) {
+      const trimmed = username.trim();
+      if (!/^[a-zA-Z0-9._]{3,30}$/.test(trimmed)) {
+        return res.status(400).json({
+          success: false,
+          message: "Username must be 3–30 characters: letters, numbers, dots or underscores.",
+        });
+      }
+      const caseChangeOnly = trimmed.toLowerCase() === req.user.username.toLowerCase();
+      if (!caseChangeOnly && (await User.usernameExists(trimmed))) {
+        return res.status(409).json({ success: false, message: "This username is already taken." });
+      }
+      updates.username = trimmed;
+    }
 
     // Handle avatar upload if a file is provided
     if (req.file) {
-      const { mimetype, buffer } = req.file;
-      // const {mimetype, buffer} = req.file;
-
-      // Determine resource_type for Cloudinary
-      let resourceType = "image"; // Default to image for profile pic
-      if (mimetype.startsWith("video/")) resourceType = "video";
-
-      const uploadResult = await new Promise((resolve, reject) => {
-        const uploadStream = cloudinary.uploader.upload_stream(
-          {
-            folder: "profile-avatars",
-            resource_type: resourceType,
-          },
-          (error, result) => {
-            if (error) return reject(error);
-            resolve(result);
-          }
-        );
-        streamifier.createReadStream(buffer).pipe(uploadStream);
-      });
-
-      updates.avatar = uploadResult.secure_url;
+      const { url } = await saveFile(req, req.file, "profile-avatars");
+      updates.avatar = url;
     }
 
-    const updatedUser = await User.findByIdAndUpdate(
-      req.user._id,
-      { $set: updates },
-      { new: true, runValidators: true }
-    ).select("username email avatar lastSeen isOnline");
+    const updatedUser = await User.update(req.user._id, updates);
 
     if (!updatedUser) {
       return res.status(404).json({ success: false, message: "User not found." });
     }
 
+    // Remove the previous avatar file once the new one is saved
+    if (updates.avatar && req.user.avatar) {
+      deleteFileByUrl(req.user.avatar).catch((err) => console.error("Old avatar cleanup failed:", err.message));
+    }
+
     res.status(200).json({
       success: true,
       message: "Profile updated successfully.",
-      user: updatedUser,
+      user: User.toPublic(updatedUser),
     });
   } catch (error) {
     next(error);
@@ -145,11 +129,7 @@ const savePushToken = async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Invalid Expo push token format." });
     }
 
-    await User.findByIdAndUpdate(
-      req.user._id,
-      { $set: { expoPushToken } },
-      { new: true }
-    );
+    await User.update(req.user._id, { expoPushToken });
 
     res.status(200).json({ success: true, message: "Push token saved successfully." });
   } catch (error) {
@@ -163,11 +143,7 @@ const savePushToken = async (req, res, next) => {
  */
 const removePushToken = async (req, res, next) => {
   try {
-    await User.findByIdAndUpdate(
-      req.user._id,
-      { $set: { expoPushToken: null } },
-      { new: true }
-    );
+    await User.update(req.user._id, { expoPushToken: null });
 
     res.status(200).json({ success: true, message: "Push token removed successfully." });
   } catch (error) {

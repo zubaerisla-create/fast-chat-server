@@ -1,6 +1,6 @@
-const mongoose = require("mongoose");
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
+const User = require("../models/User");
 
 /**
  * POST /api/conversations
@@ -18,44 +18,22 @@ const createConversation = async (req, res, next) => {
         .json({ success: false, message: "Receiver ID is required." });
     }
 
-    if (senderId.toString() === receiverId) {
+    if (senderId === receiverId) {
       return res
         .status(400)
         .json({ success: false, message: "Cannot create conversation with yourself." });
     }
 
-    // Convert string IDs to mongoose ObjectIds to ensure the $all array query matches correctly
-    const senderObjectId = new mongoose.Types.ObjectId(senderId);
-    const receiverObjectId = new mongoose.Types.ObjectId(receiverId);
-
-    // Check if a conversation already exists between these two users
-    // Using $all ensures order doesn't matter
-    const existingConversation = await Conversation.findOne({
-      participants: { $all: [senderObjectId, receiverObjectId], $size: 2 },
-    }).populate("participants", "username email avatar isOnline lastSeen");
-
-    if (existingConversation) {
-      return res.status(200).json({
-        success: true,
-        message: "Conversation already exists.",
-        conversation: existingConversation,
-      });
+    if (!(await User.findById(receiverId))) {
+      return res.status(404).json({ success: false, message: "User not found." });
     }
 
-    // Create a new conversation
-    const conversation = await Conversation.create({
-      participants: [senderId, receiverId],
-    });
+    const { conversation, created } = await Conversation.getOrCreate(senderId, receiverId);
 
-    const populated = await conversation.populate(
-      "participants",
-      "username email avatar isOnline lastSeen"
-    );
-
-    res.status(201).json({
+    res.status(created ? 201 : 200).json({
       success: true,
-      message: "Conversation created.",
-      conversation: populated,
+      message: created ? "Conversation created." : "Conversation already exists.",
+      conversation,
     });
   } catch (error) {
     next(error);
@@ -69,12 +47,7 @@ const createConversation = async (req, res, next) => {
  */
 const getUserConversations = async (req, res, next) => {
   try {
-    const conversations = await Conversation.find({
-      participants: req.user._id,
-    })
-      .populate("participants", "username email avatar isOnline lastSeen")
-      .populate("lastMessage")
-      .sort({ updatedAt: -1 });
+    const conversations = await Conversation.listForUser(req.user._id);
 
     res.status(200).json({
       success: true,
@@ -92,17 +65,15 @@ const getUserConversations = async (req, res, next) => {
  */
 const getConversationById = async (req, res, next) => {
   try {
-    const conversation = await Conversation.findOne({
-      _id: req.params.id,
-      participants: req.user._id, // Security: ensure user belongs to conversation
-    }).populate("participants", "username email avatar isOnline lastSeen");
-
-    if (!conversation) {
+    // Security: ensure user belongs to conversation
+    const membership = await Conversation.findForUser(req.params.id, req.user._id);
+    if (!membership) {
       return res
         .status(404)
         .json({ success: false, message: "Conversation not found." });
     }
 
+    const conversation = await Conversation.getFull(req.params.id);
     res.status(200).json({ success: true, conversation });
   } catch (error) {
     next(error);
@@ -119,22 +90,14 @@ const getConversationMedia = async (req, res, next) => {
     const { id } = req.params;
 
     // Verify conversation exists and user is a participant
-    const conversation = await Conversation.findOne({
-      _id: id,
-      participants: req.user._id,
-    });
-
+    const conversation = await Conversation.findForUser(id, req.user._id);
     if (!conversation) {
       return res
         .status(404)
         .json({ success: false, message: "Conversation not found or access denied." });
     }
 
-    // Find all messages in this conversation that have a fileUrl
-    const mediaMessages = await Message.find({
-      conversationId: id,
-      fileUrl: { $ne: null },
-    }).sort({ createdAt: -1 });
+    const mediaMessages = await Message.listMedia(id);
 
     res.status(200).json({
       success: true,

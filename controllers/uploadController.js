@@ -1,9 +1,9 @@
-const cloudinary = require("../config/cloudinary");
-const streamifier = require("streamifier");
+const { query } = require("../config/db");
+const { saveFile, deleteFile } = require("../utils/storage");
 
 /**
  * POST /api/upload
- * Upload a single image or file to Cloudinary.
+ * Upload a single image or file to server storage.
  * Expects multipart/form-data with field name "file".
  * Returns { url, publicId, fileType, fileName, fileSize }
  */
@@ -13,58 +13,25 @@ const uploadFile = async (req, res, next) => {
             return res.status(400).json({ success: false, message: "No file provided." });
         }
 
-        // Logging for debugging (will show up in Render logs)
-        console.log(`📤 Starting upload: ${req.file.originalname} (${req.file.mimetype})`);
+        const { mimetype, originalname, size } = req.file;
+        console.log(`📤 Starting upload: ${originalname} (${mimetype})`);
 
-        // Check if Cloudinary is configured
-        if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY) {
-            console.error("Cloudinary error: Missing credentials in environment variables.");
-            return res.status(500).json({
-                success: false,
-                message: "Cloudinary is not configured on the server. Please check environment variables.",
-            });
-        }
-
-        const { mimetype, originalname, size, buffer } = req.file;
-
-        // Determine resource_type for Cloudinary
-        let resourceType = "raw";
         let fileType = "file";
-
         if (mimetype.startsWith("image/")) {
-            resourceType = "image";
             fileType = "image";
         } else if (mimetype.startsWith("video/")) {
-            resourceType = "video";
             fileType = "video";
+        } else if (mimetype.startsWith("audio/")) {
+            fileType = "audio";
         }
 
-        // Stream buffer directly to Cloudinary
-        const uploadResult = await new Promise((resolve, reject) => {
-            const uploadStream = cloudinary.uploader.upload_stream(
-                {
-                    folder: "chat-files",
-                    resource_type: resourceType,
-                    use_filename: true,
-                    unique_filename: true,
-                },
-                (error, result) => {
-                    if (error) {
-                        console.error("❌ Cloudinary upload_stream error:", error);
-                        return reject(error);
-                    }
-                    resolve(result);
-                }
-            );
-            streamifier.createReadStream(buffer).pipe(uploadStream);
-        });
-
-        console.log(`✅ Upload successful: ${uploadResult.secure_url}`);
+        const { url, publicId } = await saveFile(req, req.file, "chat-files");
+        console.log(`✅ Upload successful: ${url}`);
 
         return res.status(200).json({
             success: true,
-            url: uploadResult.secure_url,
-            publicId: uploadResult.public_id,
+            url,
+            publicId,
             fileType,
             fileName: originalname,
             fileSize: size,
@@ -77,34 +44,28 @@ const uploadFile = async (req, res, next) => {
 
 /**
  * POST /api/upload/delete
- * Delete an uploaded file directly from Cloudinary using publicId and fileType.
- * Body: { publicId, fileType }
+ * Delete an uploaded file that was never attached to a message.
+ * Body: { publicId }
  */
 const deleteUploadedFile = async (req, res, next) => {
     try {
-        const { publicId, fileType } = req.body;
+        const { publicId } = req.body;
 
         if (!publicId) {
             return res.status(400).json({ success: false, message: "Public ID is required." });
         }
 
-        // Map frontend fileType to Cloudinary resourceType
-        let resourceType = "raw";
-        if (fileType === "image") {
-            resourceType = "image";
-        } else if (fileType === "video" || fileType === "audio") {
-            resourceType = "video";
+        // Only unsent chat uploads may be deleted this way; files attached to a
+        // message are removed together with the message.
+        const { rowCount } = await query("SELECT 1 FROM messages WHERE file_url LIKE '%/uploads/' || $1", [publicId]);
+        if (!String(publicId).startsWith("chat-files/") || rowCount > 0) {
+            return res.status(403).json({ success: false, message: "This file cannot be deleted." });
         }
 
-        console.log(`🗑️ Directly deleting file from Cloudinary: ${publicId} (type: ${resourceType})`);
+        console.log(`🗑️ Deleting uploaded file: ${publicId}`);
+        await deleteFile(publicId);
 
-        const result = await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
-
-        if (result.result === "ok" || result.result === "not found") {
-            return res.status(200).json({ success: true, message: "File deleted successfully.", result });
-        } else {
-            return res.status(400).json({ success: false, message: "Failed to delete file from Cloudinary.", result });
-        }
+        return res.status(200).json({ success: true, message: "File deleted successfully." });
     } catch (error) {
         console.error("deleteUploadedFile controller error:", error.message);
         next(error);

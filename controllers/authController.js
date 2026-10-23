@@ -1,13 +1,18 @@
 const https = require("https");
+const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const OTP = require("../models/OTP");
-const { sendOTPEmail } = require("../utils/mailer");
+const { sendOTPEmail, sendPasswordResetEmail } = require("../utils/mailer");
 
 const GOOGLE_CLIENT_IDS = [
   process.env.GOOGLE_CLIENT_ID_ANDROID || "496809230686-nnd3i14rdhb1plkddn7dl0emnihauas4.apps.googleusercontent.com",
   process.env.GOOGLE_CLIENT_ID_WEB || "496809230686-djde9n55nvgaads7e0o6qak5vjur8b61.apps.googleusercontent.com",
 ].filter(Boolean);
+
+const EMAIL_REGEX = /^\S+@\S+\.\S+$/;
+const USERNAME_REGEX = /^[a-zA-Z0-9._]{3,30}$/;
+const MIN_PASSWORD_LENGTH = 6;
 
 const verifyGoogleToken = (idToken) => {
   return new Promise((resolve, reject) => {
@@ -46,38 +51,53 @@ const generateToken = (id) => {
 };
 
 /**
+ * Standard success payload for every auth flow that logs the user in.
+ */
+const authResponse = (res, status, message, user) =>
+  res.status(status).json({
+    success: true,
+    message,
+    token: generateToken(user._id),
+    user: User.toPublic(user),
+  });
+
+const badRequest = (res, message, status = 400) => res.status(status).json({ success: false, message });
+
+const cooldownMessage = (seconds) => `Please wait ${seconds}s before requesting another code.`;
+
+/**
  * POST /api/auth/send-otp
- * Generates an OTP, saves it to the database, and sends it to the user's email.
+ * Sends a signup verification code to the email.
+ * Body: { email, username? } — username is checked early so the user isn't surprised after the OTP step.
  */
 const sendOTP = async (req, res, next) => {
   try {
-    const { email } = req.body;
+    const email = User.normalizeEmail(req.body.email);
+    const { username } = req.body;
 
-    if (!email) {
-      return res.status(400).json({ success: false, message: "Email is required." });
+    if (!EMAIL_REGEX.test(email)) {
+      return badRequest(res, "Please enter a valid email.");
     }
 
-    // Check if user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ success: false, message: "User with this email already exists." });
+    if (await User.findByEmail(email)) {
+      return badRequest(res, "An account with this email already exists. Please sign in.");
     }
 
-    // Generate a 6-digit random OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    if (username && (await User.usernameExists(username))) {
+      return badRequest(res, "This username is already taken.");
+    }
 
-    // Delete any existing OTP for this email
-    await OTP.deleteMany({ email });
+    const wait = await OTP.cooldownRemaining(email, "register");
+    if (wait > 0) {
+      return badRequest(res, cooldownMessage(wait), 429);
+    }
 
-  
-    await OTP.create({ email, otp });
-
-    // Send the OTP via email
-    await sendOTPEmail(email, otp);
+    const otp = await OTP.issue(email, "register");
+    await sendOTPEmail(email, otp, OTP.OTP_TTL_MINUTES);
 
     res.status(200).json({
       success: true,
-      message: "OTP sent successfully. Please check your email.",
+      message: "Verification code sent. Please check your email.",
     });
   } catch (error) {
     next(error);
@@ -90,54 +110,35 @@ const sendOTP = async (req, res, next) => {
  */
 const register = async (req, res, next) => {
   try {
-    const { username, email, password, otp } = req.body;
+    const { username, password, otp } = req.body;
+    const email = User.normalizeEmail(req.body.email);
 
-    console.log(username, email, password, otp);
-
-    // Basic input validation
     if (!username || !email || !password || !otp) {
-      return res
-        .status(400)
-        .json({ success: false, message: "All fields including OTP are required." });
+      return badRequest(res, "All fields including the verification code are required.");
+    }
+    if (!USERNAME_REGEX.test(username)) {
+      return badRequest(res, "Username must be 3–30 characters: letters, numbers, dots or underscores.");
+    }
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      return badRequest(res, `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
     }
 
-    // Check OTP validity
-    const otpRecord = await OTP.findOne({ email }).sort({ createdAt: -1 });
-
-    if (!otpRecord) {
-      return res.status(400).json({ success: false, message: "OTP expired or not found. Please request a new one." });
+    const check = await OTP.verify(email, "register", otp);
+    if (!check.ok) {
+      return badRequest(res, check.message);
     }
 
-    if (otpRecord.otp !== otp) {
-      return res.status(400).json({ success: false, message: "Invalid OTP." });
+    if (await User.findByEmail(email)) {
+      return badRequest(res, "An account with this email already exists. Please sign in.");
+    }
+    if (await User.usernameExists(username)) {
+      return badRequest(res, "This username is already taken.");
     }
 
-    // Check if user already exists (just in case)
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ success: false, message: "User with this email already exists." });
-    }
-
-    // Create user
     const user = await User.create({ username, email, password });
+    await OTP.consume(email, "register");
 
-    // Delete OTP record after successful verification
-    await OTP.deleteMany({ email });
-
-    const token = generateToken(user._id);
-
-    res.status(201).json({
-      success: true,
-      message: "User registered successfully.",
-      token,
-      user: {
-        _id: user._id,
-        username: user.username,
-        email: user.email,
-        avatar: user.avatar,
-        createdAt: user.createdAt,
-      },
-    });
+    authResponse(res, 201, "Account created successfully.", user);
   } catch (error) {
     next(error);
   }
@@ -147,12 +148,35 @@ const register = async (req, res, next) => {
  * POST /api/auth/login
  * Authenticate a user and return a JWT token.
  */
+const login = async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return badRequest(res, "Email and password are required.");
+    }
+
+    const user = await User.verifyPassword(email, password);
+    if (!user) {
+      return badRequest(res, "Invalid email or password.", 401);
+    }
+
+    authResponse(res, 200, "Login successful.", user);
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/auth/google
+ * Log in (or sign up) with a Google ID token.
+ */
 const googleLogin = async (req, res, next) => {
   try {
     const { idToken } = req.body;
 
     if (!idToken) {
-      return res.status(400).json({ success: false, message: "Google ID token is required." });
+      return badRequest(res, "Google ID token is required.");
     }
 
     const tokenInfo = await verifyGoogleToken(idToken);
@@ -161,92 +185,134 @@ const googleLogin = async (req, res, next) => {
     const aud = tokenInfo.aud;
 
     if (!email || !emailVerified) {
-      return res.status(401).json({ success: false, message: "Google account email is not verified." });
+      return badRequest(res, "Google account email is not verified.", 401);
     }
 
     if (GOOGLE_CLIENT_IDS.length > 0 && !GOOGLE_CLIENT_IDS.includes(aud)) {
-      return res.status(401).json({ success: false, message: "Google token audience mismatch." });
+      return badRequest(res, "Google token audience mismatch.", 401);
     }
 
-    let user = await User.findOne({ email });
+    let user = await User.findByEmail(email);
     if (!user) {
-      const rawUsername = (tokenInfo.name || email.split("@")[0]).replace(/\s+/g, "").toLowerCase();
-      let username = rawUsername || email.split("@")[0];
+      const rawUsername = (tokenInfo.name || email.split("@")[0]).replace(/[^a-zA-Z0-9._]/g, "").toLowerCase();
+      let username = (rawUsername || email.split("@")[0]).slice(0, 24);
       if (username.length < 3) {
         username = `${username}user`;
       }
 
       let uniqueUsername = username;
       let suffix = 0;
-      while (await User.findOne({ username: uniqueUsername })) {
+      while (await User.usernameExists(uniqueUsername)) {
         suffix += 1;
         uniqueUsername = `${username}${suffix}`;
       }
 
-      const randomPassword = Math.random().toString(36).slice(-10);
-
       user = await User.create({
         username: uniqueUsername,
         email,
-        password: randomPassword,
+        password: crypto.randomBytes(24).toString("hex"),
         avatar: tokenInfo.picture || "",
       });
     }
 
-    const token = generateToken(user._id);
-
-    res.status(200).json({
-      success: true,
-      message: "Login successful.",
-      token,
-      user: {
-        _id: user._id,
-        username: user.username,
-        email: user.email,
-        avatar: user.avatar,
-        isOnline: user.isOnline,
-      },
-    });
+    authResponse(res, 200, "Login successful.", user);
   } catch (error) {
     next(error);
   }
 };
 
-const login = async (req, res, next) => {
+/**
+ * POST /api/auth/forgot-password
+ * Emails a password reset code. Responds the same way whether or not the
+ * account exists, so the endpoint can't be used to discover registered emails.
+ * Body: { email }
+ */
+const forgotPassword = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const email = User.normalizeEmail(req.body.email);
 
-    if (!email || !password) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Email and password are required." });
+    if (!EMAIL_REGEX.test(email)) {
+      return badRequest(res, "Please enter a valid email.");
     }
 
-    // Explicitly select password since it is excluded by default in the schema
-    const user = await User.findOne({ email }).select("+password");
-    if (!user || !(await user.comparePassword(password))) {
-      return res
-        .status(401)
-        .json({ success: false, message: "Invalid email or password." });
+    const wait = await OTP.cooldownRemaining(email, "reset");
+    if (wait > 0) {
+      return badRequest(res, cooldownMessage(wait), 429);
     }
 
-    const token = generateToken(user._id);
+    if (await User.findByEmail(email)) {
+      const otp = await OTP.issue(email, "reset");
+      await sendPasswordResetEmail(email, otp, OTP.OTP_TTL_MINUTES);
+    }
 
     res.status(200).json({
       success: true,
-      message: "Login successful.",
-      token,
-      user: {
-        _id: user._id,
-        username: user.username,
-        email: user.email,
-        avatar: user.avatar,
-        isOnline: user.isOnline,
-      },
+      message: "If an account exists for this email, a reset code has been sent.",
     });
   } catch (error) {
     next(error);
   }
 };
 
-module.exports = { sendOTP, register, login, googleLogin };
+/**
+ * POST /api/auth/verify-reset-otp
+ * Checks a reset code before the user picks a new password (does not consume it).
+ * Body: { email, otp }
+ */
+const verifyResetOTP = async (req, res, next) => {
+  try {
+    const email = User.normalizeEmail(req.body.email);
+    const { otp } = req.body;
+
+    if (!email || !otp) {
+      return badRequest(res, "Email and code are required.");
+    }
+
+    const check = await OTP.verify(email, "reset", otp);
+    if (!check.ok) {
+      return badRequest(res, check.message);
+    }
+
+    res.status(200).json({ success: true, message: "Code verified." });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/auth/reset-password
+ * Sets a new password using a valid reset code, then logs the user in.
+ * Body: { email, otp, newPassword }
+ */
+const resetPassword = async (req, res, next) => {
+  try {
+    const email = User.normalizeEmail(req.body.email);
+    const { otp, newPassword } = req.body;
+
+    if (!email || !otp || !newPassword) {
+      return badRequest(res, "Email, code and new password are required.");
+    }
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      return badRequest(res, `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+    }
+
+    const check = await OTP.verify(email, "reset", otp);
+    if (!check.ok) {
+      return badRequest(res, check.message);
+    }
+
+    const user = await User.findByEmail(email);
+    if (!user) {
+      return badRequest(res, "Code expired or not found. Please request a new one.");
+    }
+
+    await User.updatePassword(user._id, newPassword);
+    await OTP.consume(email, "reset");
+
+    authResponse(res, 200, "Password updated successfully.", user);
+  } catch (error) {
+    next(error);
+  }
+};
+
+module.exports = { sendOTP, register, login, googleLogin, forgotPassword, verifyResetOTP, resetPassword };

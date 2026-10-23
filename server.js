@@ -1,12 +1,12 @@
 require("dotenv").config();
-// v1.0.1 - Agora Signaling Integration
 
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 
-const connectDB = require("./config/db");
+const { connectDB, pool } = require("./config/db");
+const { UPLOAD_DIR } = require("./utils/storage");
 const authRoutes = require("./routes/authRoutes");
 const userRoutes = require("./routes/userRoutes");
 const conversationRoutes = require("./routes/conversationRoutes");
@@ -19,13 +19,16 @@ const { initializeSocket } = require("./sockets/socketHandler");
 
 const app = express();
 
-// ─── Database ─────────────────────────────────────────────────────────────────
-connectDB();
+// Behind the Caddy reverse proxy in production
+app.set("trust proxy", 1);
+
+// CLIENT_URL may be a comma-separated list; the mobile app sends no Origin header and is always allowed
+const corsOrigin = process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",").map((o) => o.trim()) : true;
 
 // ─── Core Middleware ──────────────────────────────────────────────────────────
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || ["http://localhost:3000", "http://localhost:3001", "https://fast-chat-frontend-swart.vercel.app", "CLIENT_URL=https://fast-chat-frontend-app.vercel.app", "https://fast-chat-nwbp.onrender.com"],
+    origin: corsOrigin,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true,
@@ -42,6 +45,9 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// ─── Uploaded files (chat media, avatars, voice messages) ─────────────────────
+app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "30d", immutable: true, index: false }));
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
 app.use("/api/auth", authRoutes);
@@ -65,7 +71,7 @@ const httpServer = http.createServer(app);
 
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.CLIENT_URL || ["http://localhost:3000", "http://localhost:3001", "https://fast-chat-frontend-swart.vercel.app", "CLIENT_URL=https://fast-chat-frontend-app.vercel.app", "https://fast-chat-nwbp.onrender.com"],
+    origin: corsOrigin,
     methods: ["GET", "POST"],
     credentials: true,
   },
@@ -82,16 +88,19 @@ app.set("io", io);
 // ─── Start Server ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 
-httpServer.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT} in ${process.env.NODE_ENV || "development"} mode`);
-  console.log(`📡 Socket.io ready for real-time connections`);
+connectDB().then(() => {
+  httpServer.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT} in ${process.env.NODE_ENV || "development"} mode`);
+    console.log(`📡 Socket.io ready for real-time connections`);
+  });
 });
 
 // ─── Graceful Shutdown ────────────────────────────────────────────────────────
 process.on("SIGTERM", () => {
   console.log("SIGTERM received. Shutting down gracefully...");
-  httpServer.close(() => {
+  httpServer.close(async () => {
     console.log("HTTP server closed.");
+    await pool.end();
     process.exit(0);
   });
 });

@@ -1,5 +1,7 @@
+const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Message = require("../models/Message");
+const Conversation = require("../models/Conversation");
 const agoraService = require("../services/agoraService");
 const { sendVoipNotification } = require("../services/pushNotificationService");
 
@@ -16,12 +18,28 @@ const onlineUsers = new Map();
 const activeCalls = new Map();
 
 const initializeSocket = (io) => {
+  // Every socket must present the same JWT the REST API uses (sent by the app as auth.token).
+  // The verified id — never a client-supplied one — identifies the user.
+  io.use((socket, next) => {
+    try {
+      const token = socket.handshake.auth?.token;
+      if (!token) return next(new Error("Authentication required"));
+      socket.authUserId = jwt.verify(token, process.env.JWT_SECRET).id;
+      next();
+    } catch (error) {
+      next(new Error("Invalid token"));
+    }
+  });
+
   io.on("connection", (socket) => {
     console.log(`🔌 Socket connected: ${socket.id}`);
 
     // ─── USER COMES ONLINE ───────────────────────────────────────────────────
-    socket.on("userOnline", async (userId) => {
-      if (!userId) return;
+    socket.on("userOnline", async (claimedUserId) => {
+      const userId = socket.authUserId;
+      if (claimedUserId && claimedUserId !== userId) {
+        console.warn(`⚠️ [Online] Socket ${socket.id} claimed ${claimedUserId} but token is for ${userId}`);
+      }
 
       onlineUsers.set(userId, socket.id);
       socket.userId = userId;
@@ -32,7 +50,7 @@ const initializeSocket = (io) => {
       io.emit("onlineUsers", Array.from(onlineUsers.keys()));
 
       try {
-        await User.findByIdAndUpdate(userId, { isOnline: true });
+        await User.update(userId, { isOnline: true });
       } catch (err) {
         console.error("Failed to update online status:", err.message);
       }
@@ -66,10 +84,9 @@ const initializeSocket = (io) => {
 
       try {
         if (notifyUserId) {
-          await Message.updateMany(
-            { conversationId, senderId: notifyUserId, isRead: false },
-            { $set: { isRead: true } }
-          );
+          // Only participants may mark a conversation's messages as read
+          if (!(await Conversation.findForUser(conversationId, readerId))) return;
+          await Message.markRead(conversationId, readerId, notifyUserId);
 
           const senderSocketId = onlineUsers.get(notifyUserId);
           if (senderSocketId) {
@@ -240,12 +257,13 @@ const initializeSocket = (io) => {
 
     // ─── DISCONNECT ──────────────────────────────────────────────────────────
     socket.on("disconnect", async () => {
-      if (socket.userId) {
+      // Ignore a stale socket closing after the user already reconnected on a new one
+      if (socket.userId && onlineUsers.get(socket.userId) === socket.id) {
         onlineUsers.delete(socket.userId);
         io.emit("onlineUsers", Array.from(onlineUsers.keys()));
 
         try {
-          await User.findByIdAndUpdate(socket.userId, {
+          await User.update(socket.userId, {
             isOnline: false,
             lastSeen: new Date(),
           });

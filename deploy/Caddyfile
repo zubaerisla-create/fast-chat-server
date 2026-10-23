@@ -1,0 +1,6 @@
+# SITE_ADDRESS is ":80" for plain HTTP on the IP, or a domain (e.g. api.example.com)
+# to get automatic HTTPS from Let's Encrypt.
+{$SITE_ADDRESS} {
+	encode gzip
+	reverse_proxy api:5000
+}
