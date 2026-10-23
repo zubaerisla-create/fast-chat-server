@@ -54,8 +54,11 @@ app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/conversations", conversationRoutes);
 app.use("/api/messages", messageRoutes);
-app.use("/api/agora", agoraRoutes);
-app.use("/api/call", callRoutes);
+// Audio/video calling is off unless CALLS_ENABLED=true
+if (process.env.CALLS_ENABLED === "true") {
+  app.use("/api/agora", agoraRoutes);
+  app.use("/api/call", callRoutes);
+}
 app.use("/api/upload", uploadRoutes);
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────

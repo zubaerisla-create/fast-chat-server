@@ -126,6 +126,11 @@ const initializeSocket = (io) => {
      * Payload: { receiverId, callType: "audio"|"video", callerName? }
      */
     socket.on("initiate_call", async ({ receiverId, callType, callerName }) => {
+      if (process.env.CALLS_ENABLED !== "true") {
+        socket.emit("call_error", { message: "Calls are currently disabled" });
+        return;
+      }
+
       const receiverSocketId = onlineUsers.get(receiverId);
       const callerId = socket.userId;
 
