@@ -46,42 +46,37 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@v4
-
       - name: Set up SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+          # Pinned host key — no trust-on-first-use
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
 
-      - name: Upload compose files
+      - name: Deploy
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          scp -i ~/.ssh/deploy_key deploy/docker-compose.yml deploy/Caddyfile \
-            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/opt/fast-chat/"
+          # The deploy key is restricted on the VPS to /opt/fast-chat/deploy.sh;
+          # the registry token goes over stdin so it never appears in a command line.
+          printf '%s\n%s\n' "$GHCR_TOKEN" "$GITHUB_ACTOR" | \
+            ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$VPS_USER@$VPS_HOST" "deploy $GITHUB_SHA"
 
-      - name: Pull & restart
+      - name: Public health check
         run: |
-          ssh -i ~/.ssh/deploy_key "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" bash -s <<EOF
-          set -euo pipefail
-          cd /opt/fast-chat
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          export API_IMAGE="${{ env.IMAGE }}:${{ github.sha }}"
-          sed -i '/^API_IMAGE=/d' .env && echo "API_IMAGE=\$API_IMAGE" >> .env
-          docker compose pull api
-          docker compose up -d --remove-orphans
-          docker logout ghcr.io
-          docker image prune -f
-          EOF
-
-      - name: Health check
-        run: |
-          for i in $(seq 1 30); do
-            if curl -fsS "http://${{ secrets.VPS_HOST }}/health"; then exit 0; fi
+          for i in $(seq 1 20); do
+            if curl -fsS https://fastchat.hosensoft.com/health; then exit 0; fi
             sleep 3
           done
-          echo "API did not become healthy" && exit 1
+          echo "https://fastchat.hosensoft.com/health did not respond" && exit 1

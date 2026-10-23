@@ -7,5 +7,6 @@ npm-debug.log
 .github
 frontend
 uploads
-deploy
+deploy/*.yml
+deploy/*.sh
 *.md
