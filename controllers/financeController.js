@@ -240,3 +240,52 @@ exports.deleteGoal = async (req, res, next) => {
     next(err);
   }
 };
+
+const { FinanceSubscription } = require("../models/FinanceSubscription");
+
+// GET /api/finance/subscription
+exports.getSubscription = async (req, res, next) => {
+  try {
+    const sub = await FinanceSubscription.getForUser(req.user.id, req.user.createdAt || req.user.created_at);
+    res.json({ success: true, subscription: sub });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /api/finance/subscription/sync
+exports.syncSubscription = async (req, res, next) => {
+  try {
+    const { plan, revenuecatCustomerId, originalTransactionId, currentPeriodEnd, status } = req.body;
+    const sub = await FinanceSubscription.syncPurchase(req.user.id, {
+      plan,
+      revenuecatCustomerId,
+      originalTransactionId,
+      currentPeriodEnd,
+      status: status || "active",
+    });
+    res.json({ success: true, subscription: sub, message: "Subscription synced successfully." });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /api/finance/revenuecat-webhook
+exports.revenueCatWebhook = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const expectedSecret = process.env.REVENUECAT_WEBHOOK_AUTH_TOKEN;
+    if (expectedSecret && authHeader !== `Bearer ${expectedSecret}`) {
+      return res.status(401).json({ success: false, message: "Unauthorized webhook" });
+    }
+
+    const event = req.body?.event;
+    if (event) {
+      await FinanceSubscription.handleWebhook(event);
+    }
+    res.json({ success: true, received: true });
+  } catch (err) {
+    console.error("RevenueCat webhook error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};

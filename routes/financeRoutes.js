@@ -4,7 +4,14 @@ const fc = require("../controllers/financeController");
 
 const router = express.Router();
 
+// RevenueCat Webhook (public with optional bearer token verification)
+router.post("/revenuecat-webhook", fc.revenueCatWebhook);
+
 router.use(protect);
+
+// Subscription & 7-Day Trial
+router.get("/subscription", fc.getSubscription);
+router.post("/subscription/sync", fc.syncSubscription);
 
 // Dashboard & Profile
 router.get("/dashboard", fc.getDashboard);

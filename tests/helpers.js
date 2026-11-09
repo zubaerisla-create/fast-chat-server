@@ -120,6 +120,7 @@ function buildApp() {
     app.use("/api/invitations", invitations);
   }
   app.use("/api/tasks", require("../routes/taskRoutes"));
+  app.use("/api/finance", require("../routes/financeRoutes"));
   for (const [path, file] of extraRoutes) app.use(path, require(file));
   return app;
 }

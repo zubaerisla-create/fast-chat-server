@@ -508,3 +508,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS unique_pending_friend_request
 CREATE INDEX IF NOT EXISTS friend_requests_receiver_idx ON friend_requests (receiver_id, status);
 CREATE INDEX IF NOT EXISTS friend_requests_sender_idx ON friend_requests (sender_id, status);
 
+-- ═══ Finance RevenueCat Subscriptions & 7-Day Trial ═══
+CREATE TABLE IF NOT EXISTS finance_subscriptions (
+  id                                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                            UUID UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  trial_starts_at                    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  trial_ends_at                      TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '7 days'),
+  status                             VARCHAR(30) NOT NULL DEFAULT 'trialing',
+  plan                               VARCHAR(30),
+  revenuecat_customer_id             VARCHAR(255),
+  revenuecat_original_transaction_id VARCHAR(255),
+  current_period_end                 TIMESTAMPTZ,
+  created_at                         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at                         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS finance_subs_user_idx ON finance_subscriptions (user_id);
+
+
