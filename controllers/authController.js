@@ -147,18 +147,20 @@ const register = async (req, res, next) => {
 /**
  * POST /api/auth/login
  * Authenticate a user and return a JWT token.
+ * Accepts either email or username in the identifier/email field.
  */
 const login = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const identifier = req.body.email || req.body.username;
+    const { password } = req.body;
 
-    if (!email || !password) {
-      return badRequest(res, "Email and password are required.");
+    if (!identifier || !password) {
+      return badRequest(res, "Email/username and password are required.");
     }
 
-    const user = await User.verifyPassword(email, password);
+    const user = await User.verifyPassword(identifier, password);
     if (!user) {
-      return badRequest(res, "Invalid email or password.", 401);
+      return badRequest(res, "Invalid email/username or password.", 401);
     }
 
     authResponse(res, 200, "Login successful.", user);

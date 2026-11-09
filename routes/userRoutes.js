@@ -2,12 +2,14 @@ const express = require("express");
 const {
   getAllUsers,
   searchUsers,
+  searchExactUsername,
   getUserById,
   updateProfile,
   savePushToken,
   removePushToken,
 } = require("../controllers/userController");
 const { protect } = require("../middleware/authMiddleware");
+const social = require("../controllers/socialController");
 const multer = require("multer");
 
 // Multer setup for profile picture
@@ -36,7 +38,17 @@ router.use(protect);
 // PUT  /api/users/push-token   → save Expo push token
 // DELETE /api/users/push-token → remove Expo push token (logout)
 
+// GET /api/users/me — the signed-in user, including their platform role
+router.get("/me", (req, res) => {
+  const User = require("../models/User");
+  res.json({ success: true, user: { ...User.toPublic(req.user), role: req.user.role || "user" } });
+});
+router.get("/search/exact", searchExactUsername);
 router.get("/search", searchUsers);
+router.get("/blocked", social.listBlocked);
+router.post("/:id/block", social.blockUser);
+router.post("/:id/unblock", social.unblockUser);
+router.delete("/:id/block", social.unblockUser);
 router.put("/push-token", savePushToken);
 router.delete("/push-token", removePushToken);
 router.put("/profile", upload.single("avatar"), updateProfile);

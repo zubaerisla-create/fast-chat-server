@@ -1,24 +1,27 @@
 const express = require("express");
-const {
-  createConversation,
-  getUserConversations,
-  getConversationById,
-  getConversationMedia,
-} = require("../controllers/conversationController");
+const c = require("../controllers/conversationController");
 const { protect } = require("../middleware/authMiddleware");
 
 const router = express.Router();
-
-// All conversation routes require authentication
 router.use(protect);
 
-// POST /api/conversations          → create or retrieve a conversation
-// GET  /api/conversations          → get all conversations for logged-in user
-// GET  /api/conversations/:id      → get single conversation by ID
+// Direct chats (original API)
+router.post("/", c.createConversation);
+router.get("/", c.getUserConversations); // ?type=direct|group|channel&archived=true
+router.get("/search", c.searchConversations); // ?q=
 
-router.post("/", createConversation);
-router.get("/", getUserConversations);
-router.get("/:id", getConversationById);
-router.get("/:id/media", getConversationMedia);
+// Groups
+router.post("/groups", c.createGroup);
+router.get("/join/:code", c.previewInvite);
+router.post("/join/:code", c.joinByInvite);
+
+router.get("/:id", c.getConversationById);
+router.patch("/:id", c.updateGroup);
+router.get("/:id/media", c.getConversationMedia);
+router.patch("/:id/membership", c.updateMembership); // mute / pin / archive (per user)
+router.post("/:id/members", c.addMembers);
+router.delete("/:id/members/:userId", c.removeMember); // own id = leave
+router.patch("/:id/members/:userId", c.setMemberRole);
+router.post("/:id/invite-link", c.getInviteLink);
 
 module.exports = router;

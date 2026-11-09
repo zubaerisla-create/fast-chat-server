@@ -1,4 +1,4 @@
-const { onlineUsers } = require("../sockets/socketHandler");
+const { onlineUsers, userRoom } = require("../sockets/socketHandler");
 
 
 const initiateCall = async (req, res) => {
@@ -17,11 +17,9 @@ const initiateCall = async (req, res) => {
         console.log(`DEBUG: Looking up receiverSocketId for receiverId: ${receiverId}`);
         console.log(`DEBUG: Available online users in map: ${Array.from(onlineUsers.keys())}`);
 
-        const receiverSocketId = onlineUsers.get(receiverId);
-
-        if (receiverSocketId) {
-            // Emit incoming_call event to the receiver
-            io.to(receiverSocketId).emit("incoming_call", {
+        if (onlineUsers.has(receiverId)) {
+            // Emit incoming_call event to every device of the receiver
+            io.to(userRoom(receiverId)).emit("incoming_call", {
                 callerId,
                 callerName: req.user.name, // Assuming req.user is populated by protect middleware
                 channelName,
@@ -66,17 +64,11 @@ const endCall = async (req, res) => {
 
         // Notify the other user if ID is provided
         if (otherUserId) {
-            const otherUserSocketId = onlineUsers.get(otherUserId);
-            if (otherUserSocketId) {
-                io.to(otherUserSocketId).emit("call_ended", { channelName });
-            }
+            io.to(userRoom(otherUserId)).emit("call_ended", { channelName });
         }
 
         // Optionally notify the sender as well if they need confirmation via socket
-        const senderSocketId = onlineUsers.get(userId || req.user.id);
-        if (senderSocketId) {
-            io.to(senderSocketId).emit("call_ended", { channelName });
-        }
+        io.to(userRoom(userId || req.user.id)).emit("call_ended", { channelName });
 
         res.status(200).json({
             success: true,

@@ -14,8 +14,21 @@ const messageRoutes = require("./routes/messageRoutes");
 const agoraRoutes = require("./routes/agoraRoutes");
 const callRoutes = require("./routes/callRoutes");
 const uploadRoutes = require("./routes/uploadRoutes");
+const { billingRouter, billingWebhookRouter } = require("./routes/billingRoutes");
+const adminRoutes = require("./routes/adminRoutes");
+const { getBillingConfig } = require("./config/billing");
 const { errorHandler } = require("./middleware/errorMiddleware");
 const { initializeSocket } = require("./sockets/socketHandler");
+
+// Invalid billing configuration stops the server here instead of failing on the first payment
+const billingConfig = getBillingConfig();
+console.log(
+  `💳 Billing: Paddle ${billingConfig.paddle.enabled ? `${billingConfig.paddle.environment === "production" ? "live" : "sandbox"} (checkout ${billingConfig.paddle.checkoutEnabled ? "on" : "off"})` : "off"}`
+);
+if (billingConfig.paddle.enabled && billingConfig.paddle.missingPriceEnv.length) {
+  // Names only; those offers can't be bought until the variable is set
+  console.warn(`💳 Paddle price IDs not set: ${billingConfig.paddle.missingPriceEnv.join(", ")}`);
+}
 
 const app = express();
 
@@ -34,6 +47,7 @@ app.use(
     credentials: true,
   })
 );
+app.use("/api/billing/webhooks", billingWebhookRouter); // raw body — must come before express.json
 app.use(express.json({ limit: "10kb" })); // Limit request body size
 app.use(express.urlencoded({ extended: true }));
 
@@ -60,14 +74,27 @@ app.use(
 // ─── API Routes ───────────────────────────────────────────────────────────────
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/friends", require("./routes/friendRoutes"));
+app.use("/api/requests", require("./routes/friendRoutes"));
 app.use("/api/conversations", conversationRoutes);
 app.use("/api/messages", messageRoutes);
+app.use("/api/notifications", require("./routes/notificationRoutes"));
+{
+  const { workspaces, organizations, invitations } = require("./routes/workspaceRoutes");
+  app.use("/api/workspaces", workspaces);
+  app.use("/api/organizations", organizations);
+  app.use("/api/invitations", invitations);
+}
+app.use("/api/tasks", require("./routes/taskRoutes"));
+app.use("/api/finance", require("./routes/financeRoutes"));
 // Audio/video calling is off unless CALLS_ENABLED=true
 if (process.env.CALLS_ENABLED === "true") {
   app.use("/api/agora", agoraRoutes);
   app.use("/api/call", callRoutes);
 }
 app.use("/api/upload", uploadRoutes);
+app.use("/api/billing", billingRouter);
+app.use("/api/admin", adminRoutes);
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use((req, res) => {
@@ -95,6 +122,7 @@ initializeSocket(io);
 
 // Store io in app to access from controllers
 app.set("io", io);
+require("./services/realtime").setIo(io);
 
 // ─── Start Server ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;

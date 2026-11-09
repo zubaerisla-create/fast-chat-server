@@ -1,4 +1,6 @@
 const User = require("../models/User");
+const Block = require("../models/Block");
+const FriendRequest = require("../models/FriendRequest");
 const { saveFile, deleteFileByUrl } = require("../utils/storage");
 const { isValidExpoPushToken } = require("../services/pushNotificationService");
 
@@ -23,7 +25,7 @@ const getAllUsers = async (req, res, next) => {
  */
 const searchUsers = async (req, res, next) => {
   try {
-    const { query } = req.query;
+    const { query, exact } = req.query;
 
     if (!query || query.trim() === "") {
       return res
@@ -31,9 +33,52 @@ const searchUsers = async (req, res, next) => {
         .json({ success: false, message: "Search query is required." });
     }
 
+    if (exact === "true") {
+      return searchExactUsername(req, res, next);
+    }
+
     const users = await User.search(req.user._id, query.trim());
 
     res.status(200).json({ success: true, count: users.length, users });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * GET /api/users/search/exact?username=...
+ * Search user by EXACT full username only.
+ * No substring matches. Never reveals blocked users or current user.
+ */
+const searchExactUsername = async (req, res, next) => {
+  try {
+    const raw = req.query.username || req.query.query;
+    if (!raw || !raw.trim()) {
+      return res.status(400).json({ success: false, message: "Username is required." });
+    }
+    const target = raw.trim();
+
+    if (target.toLowerCase() === req.user.username.toLowerCase()) {
+      return res.status(400).json({ success: false, message: "Cannot search for yourself." });
+    }
+
+    const user = await User.findByExactUsername(target);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found." });
+    }
+
+    if (await Block.between(req.user._id, user._id)) {
+      return res.status(404).json({ success: false, message: "User not found." });
+    }
+
+    const relationship = await FriendRequest.getRelationshipStatus(req.user._id, user._id);
+
+    return res.status(200).json({
+      success: true,
+      user: User.toPublic(user),
+      relationship: relationship.status,
+      requestId: relationship.requestId || null,
+    });
   } catch (error) {
     next(error);
   }
@@ -151,4 +196,4 @@ const removePushToken = async (req, res, next) => {
   }
 };
 
-module.exports = { getAllUsers, searchUsers, getUserById, updateProfile, savePushToken, removePushToken };
+module.exports = { getAllUsers, searchUsers, searchExactUsername, getUserById, updateProfile, savePushToken, removePushToken };

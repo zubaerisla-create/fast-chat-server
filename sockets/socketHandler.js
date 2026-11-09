@@ -6,10 +6,13 @@ const agoraService = require("../services/agoraService");
 const { sendVoipNotification } = require("../services/pushNotificationService");
 
 /**
- * In-memory map: userId (string) → socketId (string)
+ * In-memory map: userId (string) → Set of socketIds — a user can be online on several devices at once.
+ * Every socket of a user also joins userRoom(userId), so emits reach all of that user's devices.
  * For multi-server deployments, replace this with Redis.
  */
 const onlineUsers = new Map();
+
+const userRoom = (userId) => `user:${userId}`;
 
 /**
  * In-memory map: channelName (string) → { callerId, receiverId, callType }
@@ -33,6 +36,8 @@ const initializeSocket = (io) => {
 
   io.on("connection", (socket) => {
     console.log(`🔌 Socket connected: ${socket.id}`);
+    // The token is already verified, so deliveries start immediately; "userOnline" only adds presence
+    socket.join(userRoom(socket.authUserId));
 
     // ─── USER COMES ONLINE ───────────────────────────────────────────────────
     socket.on("userOnline", async (claimedUserId) => {
@@ -41,11 +46,14 @@ const initializeSocket = (io) => {
         console.warn(`⚠️ [Online] Socket ${socket.id} claimed ${claimedUserId} but token is for ${userId}`);
       }
 
-      onlineUsers.set(userId, socket.id);
+      let sockets = onlineUsers.get(userId);
+      if (!sockets) onlineUsers.set(userId, (sockets = new Set()));
+      sockets.add(socket.id);
+      socket.join(userRoom(userId));
       socket.userId = userId;
 
-      console.log(`👤 [Online] ${userId} → socket ${socket.id}`);
-      console.log(`📋 [Online] All connected: ${JSON.stringify(Array.from(onlineUsers.entries()))}`);
+      console.log(`👤 [Online] ${userId} → socket ${socket.id} (${sockets.size} device(s))`);
+      console.log(`📋 [Online] Users connected: ${onlineUsers.size}`);
 
       io.emit("onlineUsers", Array.from(onlineUsers.keys()));
 
@@ -58,64 +66,91 @@ const initializeSocket = (io) => {
 
     // ─── MESSAGES ────────────────────────────────────────────────────────────
     // Handle both "sendMessage" and "send_message" — client uses "send_message"
-    const handleSendMessage = ({ receiverId, message, conversationId: convId }) => {
-      // Note: Real-time delivery is primarily handled by messageController via API.
-      // This socket handler is a fallback for direct socket sends.
-      if (!message) return;
-      if (receiverId) {
-        const receiverSocketId = onlineUsers.get(receiverId);
-        if (receiverSocketId) {
-          io.to(receiverSocketId).emit("receiveMessage", { message });
-        }
+    // Real-time delivery is handled by messageController when a message is saved through the API.
+    // This fallback only re-sends a message that is already stored, was sent by this socket's
+    // verified user, and goes to a participant of its conversation — never client-supplied content.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const handleSendMessage = async ({ receiverId, message } = {}) => {
+      const userId = socket.authUserId;
+      const messageId = message?._id;
+      if (!receiverId || typeof messageId !== "string" || !UUID_RE.test(messageId)) return;
+      try {
+        const row = await Message.findById(messageId);
+        if (!row || row.sender_id !== userId) return;
+        const conversation = await Conversation.findForUser(row.conversation_id, userId);
+        if (!conversation || !(await Conversation.memberIds(conversation.id)).includes(receiverId)) return;
+        io.to(userRoom(receiverId)).emit("receiveMessage", { message: await Message.getFull(messageId) });
+      } catch (err) {
+        console.error("Socket message relay failed:", err.message);
       }
     };
 
     socket.on("sendMessage", handleSendMessage);
     socket.on("send_message", handleSendMessage);
 
-    // senderId = original message sender (who we notify)
-    // seenBy = person who read the messages (same as socket.userId)
-    socket.on("markMessagesSeen", async ({ conversationId, senderId, seenBy, messageIds }) => {
-      const readerId = socket.userId;
-      // Accept senderId from frontend (targetUserId passed explicitly)
-      const notifyUserId = senderId || null;
+    // Members of a conversation, cached briefly per socket so typing events don't hit the DB each keystroke
+    const memberCache = new Map();
+    const membersOf = async (conversationId) => {
+      const hit = memberCache.get(conversationId);
+      if (hit && Date.now() - hit.at < 60000) return hit.ids;
+      const conv = await Conversation.findForUser(conversationId, socket.authUserId);
+      const ids = conv ? await Conversation.memberIds(conversationId) : null;
+      memberCache.set(conversationId, { at: Date.now(), ids });
+      return ids;
+    };
+    const toOtherMembers = async (conversationId, event, payload) => {
+      if (typeof conversationId !== "string" || !UUID_RE.test(conversationId)) return;
+      const ids = await membersOf(conversationId);
+      if (!ids) return;
+      for (const id of ids) if (id !== socket.authUserId) io.to(userRoom(id)).emit(event, payload);
+    };
 
-      if (!readerId || !conversationId) return;
-
+    // Reader marks a conversation read; everyone else in it is told (works for direct chats and groups)
+    socket.on("markMessagesSeen", async ({ conversationId, senderId } = {}) => {
+      const readerId = socket.authUserId;
+      if (!readerId || typeof conversationId !== "string" || !UUID_RE.test(conversationId)) return;
       try {
-        if (notifyUserId) {
-          // Only participants may mark a conversation's messages as read
-          if (!(await Conversation.findForUser(conversationId, readerId))) return;
-          await Message.markRead(conversationId, readerId, notifyUserId);
-
-          const senderSocketId = onlineUsers.get(notifyUserId);
-          if (senderSocketId) {
-            io.to(senderSocketId).emit("messagesSeen", {
-              conversationId,
-              messageIds: messageIds || [],
-              seenBy: readerId,
-              seenAt: new Date(),
-            });
-          }
-        }
+        if (!(await Conversation.findForUser(conversationId, readerId))) return;
+        const updated = await Message.markRead(conversationId, readerId, senderId && UUID_RE.test(senderId) ? senderId : null);
+        await toOtherMembers(conversationId, "messagesSeen", {
+          conversationId,
+          messageIds: updated.map((m) => m.id),
+          seenBy: readerId,
+          seenAt: new Date(),
+        });
       } catch (err) {
         console.error("Failed to mark messages as seen:", err.message);
       }
     });
 
-    // ─── TYPING ──────────────────────────────────────────────────────────────
-    socket.on("typing", ({ receiverId, conversationId }) => {
-      const receiverSocketId = onlineUsers.get(receiverId);
-      if (receiverSocketId) {
-        io.to(receiverSocketId).emit("userTyping", { senderId: socket.userId, conversationId });
+    // Recipient's device acknowledges receipt → senders see "delivered"
+    socket.on("messagesDelivered", async ({ messageIds } = {}) => {
+      if (!Array.isArray(messageIds)) return;
+      const ids = messageIds.filter((id) => typeof id === "string" && UUID_RE.test(id)).slice(0, 200);
+      try {
+        const updated = await Message.markDelivered(ids, socket.authUserId);
+        const bySender = new Map();
+        for (const m of updated) (bySender.get(m.senderId) || bySender.set(m.senderId, []).get(m.senderId)).push(m);
+        for (const [sender, list] of bySender) {
+          io.to(userRoom(sender)).emit("messagesDelivered", {
+            messageIds: list.map((m) => m.id),
+            conversationId: list[0].conversationId,
+            deliveredTo: socket.authUserId,
+            deliveredAt: new Date(),
+          });
+        }
+      } catch (err) {
+        console.error("Failed to mark delivered:", err.message);
       }
     });
 
-    socket.on("stopTyping", ({ receiverId, conversationId }) => {
-      const receiverSocketId = onlineUsers.get(receiverId);
-      if (receiverSocketId) {
-        io.to(receiverSocketId).emit("userStoppedTyping", { senderId: socket.userId, conversationId });
-      }
+    // ─── TYPING ──────────────────────────────────────────────────────────────
+    // Only relayed to the other members of a conversation the sender belongs to
+    socket.on("typing", ({ conversationId } = {}) => {
+      toOtherMembers(conversationId, "userTyping", { senderId: socket.authUserId, conversationId }).catch(() => {});
+    });
+    socket.on("stopTyping", ({ conversationId } = {}) => {
+      toOtherMembers(conversationId, "userStoppedTyping", { senderId: socket.authUserId, conversationId }).catch(() => {});
     });
 
     // ─── CALL SIGNALING ──────────────────────────────────────────────────────
@@ -131,7 +166,6 @@ const initializeSocket = (io) => {
         return;
       }
 
-      const receiverSocketId = onlineUsers.get(receiverId);
       const callerId = socket.userId;
 
       if (!callerId) {
@@ -150,14 +184,12 @@ const initializeSocket = (io) => {
       console.log(`📡 [Call] Channel created: ${channelName}`);
 
       // Notify receiver via socket if they happen to be online
-      if (receiverSocketId) {
-        io.to(receiverSocketId).emit("incomingCall", {
-          callerId,
-          callerName: callerName || "User",
-          channelName,
-          callType,
-        });
-      }
+      io.to(userRoom(receiverId)).emit("incomingCall", {
+        callerId,
+        callerName: callerName || "User",
+        channelName,
+        callType,
+      });
 
       // Trigger Native VoIP Push (wakes up killed/backgrounded apps)
       try {
@@ -184,13 +216,11 @@ const initializeSocket = (io) => {
      * Payload: { callerId, channelName }
      */
     socket.on("accept_call", ({ callerId, channelName }) => {
-      const callerSocketId = onlineUsers.get(callerId);
       const receiverId = socket.userId;
 
       console.log(`✅ [Call] accept_call for channel: ${channelName} by ${receiverId}`);
-      console.log(`🔍 [Call] Caller socket: ${callerSocketId}, Receiver socket: ${socket.id}`);
 
-      if (!callerSocketId) {
+      if (!onlineUsers.has(callerId)) {
         socket.emit("call_error", { message: "Caller is no longer online" });
         return;
       }
@@ -204,7 +234,7 @@ const initializeSocket = (io) => {
         console.log(`   Caller UID: 1, Receiver UID: 2`);
 
         // Send to Caller (uid=1)
-        io.to(callerSocketId).emit("call_joined", {
+        io.to(userRoom(callerId)).emit("call_joined", {
           channelName,
           token: callerToken.token,
           uid: 1,
@@ -227,7 +257,7 @@ const initializeSocket = (io) => {
       } catch (error) {
         console.error("[Agora] Token generation FAILED:", error.message);
         socket.emit("call_error", { message: "Failed to generate Agora token" });
-        io.to(callerSocketId).emit("call_error", { message: "Failed to generate Agora token" });
+        io.to(userRoom(callerId)).emit("call_error", { message: "Failed to generate Agora token" });
       }
     });
 
@@ -236,12 +266,9 @@ const initializeSocket = (io) => {
      * Payload: { callerId, channelName }
      */
     socket.on("reject_call", ({ callerId, channelName }) => {
-      const callerSocketId = onlineUsers.get(callerId);
       activeCalls.delete(channelName);
-      if (callerSocketId) {
-        io.to(callerSocketId).emit("call_rejected", { receiverId: socket.userId });
-        console.log(`🚫 [Call] Rejected: ${socket.userId} → ${callerId}`);
-      }
+      io.to(userRoom(callerId)).emit("call_rejected", { receiverId: socket.userId });
+      console.log(`🚫 [Call] Rejected: ${socket.userId} → ${callerId}`);
     });
 
     /**
@@ -249,21 +276,19 @@ const initializeSocket = (io) => {
      * Payload: { otherUserId, channelName }
      */
     socket.on("end_call", ({ otherUserId, channelName }) => {
-      const otherSocketId = onlineUsers.get(otherUserId);
       activeCalls.delete(channelName);
 
       console.log(`🏁 [Call] end_call from ${socket.userId}, channel: ${channelName}`);
 
-      if (otherSocketId) {
-        io.to(otherSocketId).emit("call_ended", { channelName });
-      }
+      io.to(userRoom(otherUserId)).emit("call_ended", { channelName });
       socket.emit("call_ended", { channelName });
     });
 
     // ─── DISCONNECT ──────────────────────────────────────────────────────────
     socket.on("disconnect", async () => {
-      // Ignore a stale socket closing after the user already reconnected on a new one
-      if (socket.userId && onlineUsers.get(socket.userId) === socket.id) {
+      // The user stays online while any other device (or a newer reconnect) still has a socket open
+      const sockets = socket.userId && onlineUsers.get(socket.userId);
+      if (sockets && sockets.delete(socket.id) && sockets.size === 0) {
         onlineUsers.delete(socket.userId);
         io.emit("onlineUsers", Array.from(onlineUsers.keys()));
 
@@ -282,4 +307,4 @@ const initializeSocket = (io) => {
   });
 };
 
-module.exports = { initializeSocket, onlineUsers };
+module.exports = { initializeSocket, onlineUsers, userRoom };

@@ -21,6 +21,7 @@ const fromRow = (row) =>
     expoPushToken: row.expo_push_token,
     fcmToken: row.fcm_token,
     apnsVoipToken: row.apns_voip_token,
+    role: row.role,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -50,6 +51,13 @@ const findByEmail = async (email) => {
   return fromRow(rows[0]);
 };
 
+const findByExactUsername = async (username) => {
+  const clean = String(username || "").trim();
+  if (!clean) return null;
+  const { rows } = await query("SELECT * FROM users WHERE lower(username) = lower($1)", [clean]);
+  return fromRow(rows[0]);
+};
+
 const usernameExists = async (username) => {
   const { rowCount } = await query("SELECT 1 FROM users WHERE lower(username) = lower($1)", [username]);
   return rowCount > 0;
@@ -67,9 +75,15 @@ const create = async ({ username, email, password, avatar = "" }) => {
 
 /**
  * Checks a plain password against the stored bcrypt hash.
+ * Supports login via either email or username.
  */
-const verifyPassword = async (email, password) => {
-  const { rows } = await query("SELECT * FROM users WHERE email = $1", [normalizeEmail(email)]);
+const verifyPassword = async (identifier, password) => {
+  const clean = String(identifier || "").trim();
+  const normEmail = normalizeEmail(clean);
+  const { rows } = await query(
+    "SELECT * FROM users WHERE email = $1 OR lower(username) = lower($2)",
+    [normEmail, clean]
+  );
   const row = rows[0];
   if (!row || !(await bcrypt.compare(password, row.password_hash))) return null;
   return fromRow(row);
@@ -136,6 +150,7 @@ module.exports = {
   toPublic,
   findById,
   findByEmail,
+  findByExactUsername,
   usernameExists,
   create,
   verifyPassword,

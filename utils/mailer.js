@@ -59,7 +59,14 @@ const codeEmailHtml = ({ heading, intro, code, minutes, footnote }) => `
   </body>
 </html>`;
 
+const escapeHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
 const send = async ({ to, subject, html, text }) => {
+  // MAIL_TRANSPORT=log (local dev): print instead of sending real email
+  if (process.env.MAIL_TRANSPORT === "log") {
+    console.log(`📧 [mail:log] to=${to} subject="${subject}"\n${text}`);
+    return { messageId: "logged" };
+  }
   const info = await getTransporter().sendMail({
     from: { name: "Fast Chat", address: process.env.EMAIL_USER },
     to,
@@ -99,4 +106,19 @@ const sendPasswordResetEmail = (toEmail, otp, minutes) =>
     }),
   });
 
-module.exports = { sendOTPEmail, sendPasswordResetEmail };
+/** Workspace invitation with an accept link (the token is only in the link). */
+const sendInvitationEmail = (toEmail, { workspaceName, inviterName, role, link, days }) =>
+  send({
+    to: toEmail,
+    subject: `${inviterName} invited you to ${workspaceName} on FastChat`,
+    text: `${inviterName} invited you to join ${workspaceName} on FastChat as ${role}.\n\nAccept: ${link}\n\nThis invitation expires in ${days} days.`,
+    html: `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#0B0F1A;padding:40px 16px">
+      <div style="max-width:480px;margin:0 auto;background:#131A2B;border:1px solid #232C42;border-radius:20px;padding:32px;text-align:center">
+        <h1 style="color:#F4F6FB;font-size:20px;margin:0 0 8px">Join ${escapeHtml(workspaceName)}</h1>
+        <p style="color:#98A2B8;font-size:15px;line-height:22px;margin:0 0 24px">${escapeHtml(inviterName)} invited you to join <b style="color:#F4F6FB">${escapeHtml(workspaceName)}</b> on FastChat as ${escapeHtml(role)}.</p>
+        <a href="${escapeHtml(link)}" style="display:inline-block;background:#7C6EFF;color:#fff;text-decoration:none;padding:12px 24px;border-radius:12px;font-weight:600">Accept invitation</a>
+        <p style="color:#6B7590;font-size:12px;margin:24px 0 0">This invitation expires in ${days} days. If you weren't expecting it, you can ignore this email.</p>
+      </div></div>`,
+  });
+
+module.exports = { sendOTPEmail, sendPasswordResetEmail, sendInvitationEmail };
