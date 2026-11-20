@@ -87,6 +87,7 @@ app.use("/api/notifications", require("./routes/notificationRoutes"));
 }
 app.use("/api/tasks", require("./routes/taskRoutes"));
 app.use("/api/finance", require("./routes/financeRoutes"));
+app.use("/api/games", require("./routes/gameRoutes"));
 // Audio/video calling is off unless CALLS_ENABLED=true
 if (process.env.CALLS_ENABLED === "true") {
   app.use("/api/agora", agoraRoutes);
@@ -95,6 +96,8 @@ if (process.env.CALLS_ENABLED === "true") {
 app.use("/api/upload", uploadRoutes);
 app.use("/api/billing", billingRouter);
 app.use("/api/admin", adminRoutes);
+app.use("/api/admin-center", require("./routes/adminCenterRoutes")); // Next.js admin control center
+app.use("/api/revenuecat", require("./routes/revenuecatRoutes")); // Google Play purchases via RevenueCat
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use((req, res) => {
@@ -127,7 +130,14 @@ require("./services/realtime").setIo(io);
 // ─── Start Server ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 
-connectDB().then(() => {
+connectDB().then(async () => {
+  // Game catalog seed + owner access (bound to the user id in OWNER_USER_ID, if set)
+  try {
+    await require("./services/gameCatalog").ensureSynced();
+    if (process.env.OWNER_USER_ID) await require("./services/adminRoles").provisionOwner(process.env.OWNER_USER_ID);
+  } catch (err) {
+    console.error("[Games] startup provisioning failed:", err.message);
+  }
   httpServer.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT} in ${process.env.NODE_ENV || "development"} mode`);
     console.log(`📡 Socket.io ready for real-time connections`);

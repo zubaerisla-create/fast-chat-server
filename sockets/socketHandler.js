@@ -1,9 +1,11 @@
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const sessions = require("../services/sessions");
 const Message = require("../models/Message");
 const Conversation = require("../models/Conversation");
 const agoraService = require("../services/agoraService");
 const { sendVoipNotification } = require("../services/pushNotificationService");
+const { initializeGames, registerGameHandlers } = require("./gameHandler");
 
 /**
  * In-memory map: userId (string) → Set of socketIds — a user can be online on several devices at once.
@@ -20,14 +22,21 @@ const userRoom = (userId) => `user:${userId}`;
  */
 const activeCalls = new Map();
 
-const initializeSocket = (io) => {
+const initializeSocket = (io, { games: gameOptions } = {}) => {
+  // Multiplayer mini games share this authenticated connection (see sockets/gameHandler.js)
+  initializeGames(io, gameOptions);
+
   // Every socket must present the same JWT the REST API uses (sent by the app as auth.token).
   // The verified id — never a client-supplied one — identifies the user.
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth?.token;
       if (!token) return next(new Error("Authentication required"));
-      socket.authUserId = jwt.verify(token, process.env.JWT_SECRET).id;
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      // Same session / suspension checks as the REST API
+      const reason = await sessions.checkToken(decoded, await User.findById(decoded.id));
+      if (reason) return next(new Error(reason === "suspended" ? "Account suspended" : "Invalid token"));
+      socket.authUserId = decoded.id;
       next();
     } catch (error) {
       next(new Error("Invalid token"));
@@ -38,6 +47,7 @@ const initializeSocket = (io) => {
     console.log(`🔌 Socket connected: ${socket.id}`);
     // The token is already verified, so deliveries start immediately; "userOnline" only adds presence
     socket.join(userRoom(socket.authUserId));
+    registerGameHandlers(socket);
 
     // ─── USER COMES ONLINE ───────────────────────────────────────────────────
     socket.on("userOnline", async (claimedUserId) => {

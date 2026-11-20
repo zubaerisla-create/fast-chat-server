@@ -8,7 +8,17 @@ const {
   forgotPassword,
   verifyResetOTP,
   resetPassword,
+  requestPasswordReset,
+  confirmPasswordReset,
+  changePassword,
+  refresh,
+  logout,
+  listMySessions,
+  revokeMySession,
+  revokeOtherSessions,
+  deleteAccount,
 } = require("../controllers/authController");
+const { protect } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
@@ -30,8 +40,9 @@ const codeChecks = perEmail("check", 15, 15);
 // POST /api/auth/send-otp
 router.post("/send-otp", codeRequests, sendOTP);
 
-// POST /api/auth/register
-router.post("/register", codeChecks, register);
+// POST /api/auth/register  (email + password; no verification code needed)
+const registrations = rateLimit({ windowMs: 60 * 60 * 1000, limit: 20, standardHeaders: "draft-7", legacyHeaders: false, message: { success: false, message: "Too many sign-ups from this network. Try again later." } });
+router.post("/register", registrations, codeChecks, register);
 
 // POST /api/auth/login
 router.post("/login", loginAttempts, login);
@@ -45,5 +56,20 @@ router.post("/google", googleLogin);
 router.post("/forgot-password", codeRequests, forgotPassword);
 router.post("/verify-reset-otp", codeChecks, verifyResetOTP);
 router.post("/reset-password", codeChecks, resetPassword);
+
+// Password reset by email link (no codes): request → link to the website → confirm
+router.post("/password-reset/request", codeRequests, requestPasswordReset);
+const resetConfirms = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: "draft-7", legacyHeaders: false, message: { success: false, message: "Too many attempts. Try again later." } });
+router.post("/password-reset/confirm", resetConfirms, confirmPasswordReset);
+
+// Signed-in account management
+const sensitive = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, keyGenerator: (req) => `acct:${req.user?._id}`, standardHeaders: "draft-7", legacyHeaders: false, message: { success: false, message: "Too many attempts. Try again later." } });
+router.post("/change-password", protect, sensitive, changePassword);
+router.post("/refresh", protect, refresh);
+router.post("/logout", protect, logout);
+router.get("/sessions", protect, listMySessions);
+router.delete("/sessions/:id", protect, revokeMySession);
+router.post("/sessions/revoke-others", protect, revokeOtherSessions);
+router.delete("/account", protect, sensitive, deleteAccount);
 
 module.exports = router;

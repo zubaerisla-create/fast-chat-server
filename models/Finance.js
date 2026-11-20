@@ -714,6 +714,351 @@ async function getDashboardSummary(userId, { month, year } = {}) {
   };
 }
 
+async function createExpense(userId, { title, amount, category = "Other", expenseDate, paymentMethod = "Cash", note = null }) {
+  const dateVal = expenseDate || new Date().toISOString().split("T")[0];
+  const res = await query(
+    `INSERT INTO financial_lifetime_expenses (user_id, title, amount, category, expense_date, payment_method, note)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING *`,
+    [userId, title.trim(), Number(amount), category.trim(), dateVal, paymentMethod.trim(), note ? note.trim() : null]
+  );
+  return res.rows[0];
+}
+
+async function listExpenses(userId, { startDate, endDate, category, limit = 100, offset = 0 } = {}) {
+  let q = `SELECT * FROM financial_lifetime_expenses WHERE user_id = $1`;
+  const params = [userId];
+  let idx = 2;
+
+  if (startDate) {
+    q += ` AND expense_date >= $${idx++}`;
+    params.push(startDate);
+  }
+  if (endDate) {
+    q += ` AND expense_date <= $${idx++}`;
+    params.push(endDate);
+  }
+  if (category && category !== "ALL") {
+    q += ` AND category = $${idx++}`;
+    params.push(category);
+  }
+
+  q += ` ORDER BY expense_date DESC, created_at DESC LIMIT $${idx++} OFFSET $${idx++}`;
+  params.push(limit, offset);
+
+  const res = await query(q, params);
+  return res.rows;
+}
+
+async function getLifetimeExpenseAnalytics(userId) {
+  const totalsRes = await query(
+    `SELECT
+       COALESCE(SUM(amount), 0) AS lifetime_total,
+       COUNT(*) AS total_count,
+       COALESCE(SUM(CASE WHEN expense_date = CURRENT_DATE THEN amount ELSE 0 END), 0) AS today_total,
+       COALESCE(SUM(CASE WHEN DATE_TRUNC('month', expense_date) = DATE_TRUNC('month', CURRENT_DATE) THEN amount ELSE 0 END), 0) AS this_month_total,
+       COALESCE(SUM(CASE WHEN DATE_TRUNC('year', expense_date) = DATE_TRUNC('year', CURRENT_DATE) THEN amount ELSE 0 END), 0) AS this_year_total,
+       MIN(expense_date) AS first_expense_date,
+       MAX(expense_date) AS last_expense_date,
+       COALESCE(MAX(amount), 0) AS max_single_expense
+     FROM financial_lifetime_expenses
+     WHERE user_id = $1`,
+    [userId]
+  );
+  const totals = totalsRes.rows[0] || {};
+
+  const catRes = await query(
+    `SELECT
+       category,
+       SUM(amount) AS total,
+       COUNT(*) AS count
+     FROM financial_lifetime_expenses
+     WHERE user_id = $1
+     GROUP BY category
+     ORDER BY total DESC`,
+    [userId]
+  );
+
+  const monthlyRes = await query(
+    `SELECT
+       TO_CHAR(expense_date, 'YYYY-MM') AS month_key,
+       TO_CHAR(expense_date, 'Mon YYYY') AS month_label,
+       SUM(amount) AS total,
+       COUNT(*) AS count
+     FROM financial_lifetime_expenses
+     WHERE user_id = $1
+     GROUP BY month_key, month_label
+     ORDER BY month_key DESC
+     LIMIT 24`,
+    [userId]
+  );
+
+  const yearlyRes = await query(
+    `SELECT
+       TO_CHAR(expense_date, 'YYYY') AS year_key,
+       SUM(amount) AS total,
+       COUNT(*) AS count
+     FROM financial_lifetime_expenses
+     WHERE user_id = $1
+     GROUP BY year_key
+     ORDER BY year_key DESC`,
+    [userId]
+  );
+
+  const recentRes = await query(
+    `SELECT * FROM financial_lifetime_expenses
+     WHERE user_id = $1
+     ORDER BY expense_date DESC, created_at DESC
+     LIMIT 50`,
+    [userId]
+  );
+
+  const lifetimeTotal = Number(totals.lifetime_total) || 0;
+  const categories = catRes.rows.map(r => ({
+    category: r.category,
+    total: Number(r.total) || 0,
+    count: Number(r.count) || 0,
+    percentage: lifetimeTotal > 0 ? Math.round((Number(r.total) / lifetimeTotal) * 100) : 0,
+  }));
+
+  const firstDate = totals.first_expense_date ? new Date(totals.first_expense_date) : new Date();
+  const daysActive = Math.max(1, Math.round((Date.now() - firstDate.getTime()) / (1000 * 60 * 60 * 24)) + 1);
+  const dailyAverage = lifetimeTotal > 0 ? Number((lifetimeTotal / daysActive).toFixed(2)) : 0;
+  const monthlyAverage = Number((dailyAverage * 30.41).toFixed(2));
+
+  return {
+    totals: {
+      lifetimeTotal,
+      todayTotal: Number(totals.today_total) || 0,
+      thisMonthTotal: Number(totals.this_month_total) || 0,
+      thisYearTotal: Number(totals.this_year_total) || 0,
+      maxSingleExpense: Number(totals.max_single_expense) || 0,
+      totalCount: Number(totals.total_count) || 0,
+      firstExpenseDate: totals.first_expense_date,
+      daysActive,
+      dailyAverage,
+      monthlyAverage,
+    },
+    categories,
+    monthlyHistory: monthlyRes.rows.map(r => ({
+      monthKey: r.month_key,
+      monthLabel: r.month_label,
+      total: Number(r.total) || 0,
+      count: Number(r.count) || 0,
+    })),
+    yearlyHistory: yearlyRes.rows.map(r => ({
+      yearKey: r.year_key,
+      total: Number(r.total) || 0,
+      count: Number(r.count) || 0,
+      monthlyAverage: Number(((Number(r.total) || 0) / 12).toFixed(2)),
+    })),
+    recentExpenses: recentRes.rows,
+  };
+}
+
+async function deleteExpense(userId, id) {
+  const res = await query(
+    `DELETE FROM financial_lifetime_expenses WHERE id = $1 AND user_id = $2 RETURNING *`,
+    [id, userId]
+  );
+  return res.rows[0];
+}
+
+async function createIncome(userId, { title, amount, sourceCategory = "Salary", incomeDate, paymentMethod = "Cash", note = null }) {
+  const dateVal = incomeDate || new Date().toISOString().split("T")[0];
+  const res = await query(
+    `INSERT INTO financial_lifetime_incomes (user_id, title, amount, source_category, income_date, payment_method, note)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING *`,
+    [userId, title.trim(), Number(amount), sourceCategory.trim(), dateVal, paymentMethod.trim(), note ? note.trim() : null]
+  );
+  return res.rows[0];
+}
+
+async function listIncomes(userId, { startDate, endDate, sourceCategory, limit = 100, offset = 0 } = {}) {
+  let q = `SELECT * FROM financial_lifetime_incomes WHERE user_id = $1`;
+  const params = [userId];
+  let idx = 2;
+
+  if (startDate) {
+    q += ` AND income_date >= $${idx++}`;
+    params.push(startDate);
+  }
+  if (endDate) {
+    q += ` AND income_date <= $${idx++}`;
+    params.push(endDate);
+  }
+  if (sourceCategory && sourceCategory !== "ALL") {
+    q += ` AND source_category = $${idx++}`;
+    params.push(sourceCategory);
+  }
+
+  q += ` ORDER BY income_date DESC, created_at DESC LIMIT $${idx++} OFFSET $${idx++}`;
+  params.push(Math.min(Number(limit) || 100, 500));
+  params.push(Number(offset) || 0);
+
+  const res = await query(q, params);
+  return res.rows;
+}
+
+async function getLifetimeIncomeAnalytics(userId) {
+  const totalsRes = await query(
+    `SELECT
+       COALESCE(SUM(amount), 0) AS lifetime_total,
+       COUNT(*) AS total_count,
+       COALESCE(SUM(CASE WHEN income_date = CURRENT_DATE THEN amount ELSE 0 END), 0) AS today_total,
+       COALESCE(SUM(CASE WHEN DATE_TRUNC('month', income_date) = DATE_TRUNC('month', CURRENT_DATE) THEN amount ELSE 0 END), 0) AS this_month_total,
+       COALESCE(SUM(CASE WHEN DATE_TRUNC('year', income_date) = DATE_TRUNC('year', CURRENT_DATE) THEN amount ELSE 0 END), 0) AS this_year_total,
+       MIN(income_date) AS first_income_date,
+       MAX(income_date) AS last_income_date,
+       COALESCE(MAX(amount), 0) AS max_single_income
+     FROM financial_lifetime_incomes
+     WHERE user_id = $1`,
+    [userId]
+  );
+  const totals = totalsRes.rows[0] || {};
+
+  const sourceRes = await query(
+    `SELECT
+       source_category,
+       SUM(amount) AS total,
+       COUNT(*) AS count
+     FROM financial_lifetime_incomes
+     WHERE user_id = $1
+     GROUP BY source_category
+     ORDER BY total DESC`,
+    [userId]
+  );
+
+  const monthlyRes = await query(
+    `SELECT
+       TO_CHAR(income_date, 'YYYY-MM') AS month_key,
+       TO_CHAR(income_date, 'Mon YYYY') AS month_label,
+       SUM(amount) AS total,
+       COUNT(*) AS count
+     FROM financial_lifetime_incomes
+     WHERE user_id = $1
+     GROUP BY month_key, month_label
+     ORDER BY month_key DESC
+     LIMIT 24`,
+    [userId]
+  );
+
+  const yearlyRes = await query(
+    `SELECT
+       TO_CHAR(income_date, 'YYYY') AS year_key,
+       SUM(amount) AS total,
+       COUNT(*) AS count
+     FROM financial_lifetime_incomes
+     WHERE user_id = $1
+     GROUP BY year_key
+     ORDER BY year_key DESC`,
+    [userId]
+  );
+
+  const recentRes = await query(
+    `SELECT * FROM financial_lifetime_incomes
+     WHERE user_id = $1
+     ORDER BY income_date DESC, created_at DESC
+     LIMIT 50`,
+    [userId]
+  );
+
+  const lifetimeTotal = Number(totals.lifetime_total) || 0;
+  const sources = sourceRes.rows.map(r => ({
+    sourceCategory: r.source_category,
+    category: r.source_category,
+    total: Number(r.total) || 0,
+    count: Number(r.count) || 0,
+    percentage: lifetimeTotal > 0 ? Math.round((Number(r.total) / lifetimeTotal) * 100) : 0,
+  }));
+
+  const firstDate = totals.first_income_date ? new Date(totals.first_income_date) : new Date();
+  const lastDate = totals.last_income_date ? new Date(totals.last_income_date) : new Date();
+  const daysActive = Math.max(1, Math.round(Math.abs(lastDate.getTime() - firstDate.getTime()) / (1000 * 60 * 60 * 24)) + 1);
+  const dailyAverage = Number((lifetimeTotal / daysActive).toFixed(2));
+
+  return {
+    lifetimeTotal,
+    totalCount: Number(totals.total_count) || 0,
+    todayTotal: Number(totals.today_total) || 0,
+    thisMonthTotal: Number(totals.this_month_total) || 0,
+    thisYearTotal: Number(totals.this_year_total) || 0,
+    firstIncomeDate: totals.first_income_date,
+    lastIncomeDate: totals.last_income_date,
+    maxSingleIncome: Number(totals.max_single_income) || 0,
+    dailyAverage,
+    daysActive,
+    sources,
+    monthlyHistory: monthlyRes.rows.map(r => ({
+      monthKey: r.month_key,
+      monthLabel: r.month_label,
+      total: Number(r.total) || 0,
+      count: Number(r.count) || 0,
+    })),
+    yearlyHistory: yearlyRes.rows.map(r => ({
+      yearKey: r.year_key,
+      total: Number(r.total) || 0,
+      count: Number(r.count) || 0,
+      monthlyAverage: Number(((Number(r.total) || 0) / 12).toFixed(2)),
+    })),
+    recentIncomes: recentRes.rows,
+  };
+}
+
+async function deleteIncome(userId, id) {
+  const res = await query(
+    `DELETE FROM financial_lifetime_incomes WHERE id = $1 AND user_id = $2 RETURNING *`,
+    [id, userId]
+  );
+  return res.rows[0];
+}
+
+async function getLifetimeFinancialSummary(userId) {
+  const [expenseData, incomeData] = await Promise.all([
+    getLifetimeExpenseAnalytics(userId),
+    getLifetimeIncomeAnalytics(userId),
+  ]);
+
+  const lifetimeIncome = incomeData.lifetimeTotal || 0;
+  const lifetimeExpense = expenseData.lifetimeTotal || 0;
+  const netLifetime = Number((lifetimeIncome - lifetimeExpense).toFixed(2));
+
+  const thisMonthIncome = incomeData.thisMonthTotal || 0;
+  const thisMonthExpense = expenseData.thisMonthTotal || 0;
+  const thisMonthNet = Number((thisMonthIncome - thisMonthExpense).toFixed(2));
+
+  const thisYearIncome = incomeData.thisYearTotal || 0;
+  const thisYearExpense = expenseData.thisYearTotal || 0;
+  const thisYearNet = Number((thisYearIncome - thisYearExpense).toFixed(2));
+
+  const todayIncome = incomeData.todayTotal || 0;
+  const todayExpense = expenseData.todayTotal || 0;
+  const todayNet = Number((todayIncome - todayExpense).toFixed(2));
+
+  const savingsRate = lifetimeIncome > 0
+    ? Math.max(0, Math.round(((lifetimeIncome - lifetimeExpense) / lifetimeIncome) * 100))
+    : 0;
+
+  return {
+    lifetimeIncome,
+    lifetimeExpense,
+    netLifetime,
+    thisMonthIncome,
+    thisMonthExpense,
+    thisMonthNet,
+    thisYearIncome,
+    thisYearExpense,
+    thisYearNet,
+    todayIncome,
+    todayExpense,
+    todayNet,
+    savingsRate,
+    expenseAnalytics: expenseData,
+    incomeAnalytics: incomeData,
+  };
+}
+
 module.exports = {
   calculateSimulation,
   getProfile,
@@ -735,4 +1080,13 @@ module.exports = {
   updateGoal,
   deleteGoal,
   getDashboardSummary,
+  createExpense,
+  listExpenses,
+  getLifetimeExpenseAnalytics,
+  deleteExpense,
+  createIncome,
+  listIncomes,
+  getLifetimeIncomeAnalytics,
+  deleteIncome,
+  getLifetimeFinancialSummary,
 };

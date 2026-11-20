@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const sessions = require("../services/sessions");
 
 /**
  * Middleware to protect private routes.
@@ -37,7 +38,18 @@ const protect = async (req, res, next) => {
       });
     }
 
+    // Session still valid, account not suspended (services/sessions.js)
+    const reason = await sessions.checkToken(decoded, user);
+    if (reason) {
+      return res.status(reason === "suspended" ? 403 : 401).json({
+        success: false,
+        code: reason === "suspended" ? "account_suspended" : "session_revoked",
+        message: reason === "suspended" ? "This account is suspended. Contact support." : "You were signed out. Please sign in again.",
+      });
+    }
+
     req.user = user;
+    req.auth = decoded;
     next();
   } catch (error) {
     if (error.name === "JsonWebTokenError") {

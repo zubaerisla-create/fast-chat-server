@@ -121,4 +121,19 @@ const sendInvitationEmail = (toEmail, { workspaceName, inviterName, role, link, 
       </div></div>`,
   });
 
-module.exports = { sendOTPEmail, sendPasswordResetEmail, sendInvitationEmail };
+/** Password reset link (the token only exists in this link; the server stores its hash). */
+const sendPasswordResetLinkEmail = (toEmail, { link, minutes }) =>
+  send({
+    to: toEmail,
+    subject: "Reset your FastChat password",
+    text: `Someone asked to reset the password of your FastChat account.\n\nChoose a new password: ${link}\n\nThe link works once and expires in ${minutes} minutes. If it wasn't you, ignore this email — your password stays the same.`,
+    html: `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#F5F4F0;padding:40px 16px">
+      <div style="max-width:480px;margin:0 auto;background:#FFFFFF;border:1px solid #E5E3DE;border-radius:16px;padding:32px;text-align:center">
+        <h1 style="color:#171717;font-size:20px;margin:0 0 8px">Reset your password</h1>
+        <p style="color:#4A4A4A;font-size:15px;line-height:22px;margin:0 0 24px">Tap the button to choose a new password for your FastChat account.</p>
+        <a href="${escapeHtml(link)}" style="display:inline-block;background:#171717;color:#fff;text-decoration:none;padding:12px 24px;border-radius:12px;font-weight:600">Choose a new password</a>
+        <p style="color:#777777;font-size:12px;margin:24px 0 0">The link works once and expires in ${minutes} minutes. If you didn't ask for this, ignore this email.</p>
+      </div></div>`,
+  });
+
+module.exports = { sendOTPEmail, sendPasswordResetEmail, sendInvitationEmail, sendPasswordResetLinkEmail };

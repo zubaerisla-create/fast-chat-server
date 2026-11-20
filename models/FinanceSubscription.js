@@ -88,7 +88,8 @@ class FinanceSubscription {
   }
 
   /**
-   * Sync purchase from RevenueCat SDK or in-app purchase
+   * Writes a store-verified state. Only call with data from RevenueCat's API
+   * (services/revenuecat.reconcileFinance) — never with values sent by the app.
    */
   static async syncPurchase(userId, data) {
     const {
@@ -117,51 +118,6 @@ class FinanceSubscription {
     return this.evaluateAccess(res.rows[0]);
   }
 
-  /**
-   * Handle webhook from RevenueCat
-   */
-  static async handleWebhook(event) {
-    if (!event) return null;
-    const {
-      type,
-      app_user_id,
-      product_id,
-      expiration_at_ms,
-      original_transaction_id,
-    } = event;
-
-    if (!app_user_id) return null;
-
-    let plan = "monthly";
-    const pId = (product_id || "").toLowerCase();
-    if (pId.includes("lifetime")) plan = "lifetime";
-    else if (pId.includes("year") || pId.includes("annual")) plan = "yearly";
-
-    let status = "active";
-    let periodEnd = expiration_at_ms ? new Date(expiration_at_ms).toISOString() : null;
-
-    if (type === "EXPIRATION" || type === "SUBSCRIPTION_PAUSED") {
-      status = "expired";
-    } else if (type === "CANCELLATION") {
-      // User cancelled auto-renew, but might still have access until period ends
-      if (periodEnd && new Date(periodEnd) <= new Date()) {
-        status = "expired";
-      } else {
-        status = "active";
-      }
-    } else if (plan === "lifetime") {
-      status = "lifetime";
-      periodEnd = null;
-    }
-
-    return this.syncPurchase(app_user_id, {
-      plan,
-      status,
-      revenuecatCustomerId: app_user_id,
-      originalTransactionId: original_transaction_id,
-      currentPeriodEnd: periodEnd,
-    });
-  }
 }
 
 module.exports = {

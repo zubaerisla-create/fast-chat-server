@@ -39,9 +39,16 @@ router.use(protect);
 // DELETE /api/users/push-token → remove Expo push token (logout)
 
 // GET /api/users/me — the signed-in user, including their platform role
-router.get("/me", (req, res) => {
-  const User = require("../models/User");
-  res.json({ success: true, user: { ...User.toPublic(req.user), role: req.user.role || "user" } });
+router.get("/me", async (req, res, next) => {
+  try {
+    const User = require("../models/User");
+    const { roleOf } = require("../services/adminRoles");
+    // adminRole: admin control center role (super_admin, admin, support, game_manager, analyst) or null
+    const adminRole = await roleOf(req.user._id);
+    res.json({ success: true, user: { ...User.toPublic(req.user), role: req.user.role || "user", adminRole } });
+  } catch (error) {
+    next(error);
+  }
 });
 router.get("/search/exact", searchExactUsername);
 router.get("/search", searchUsers);

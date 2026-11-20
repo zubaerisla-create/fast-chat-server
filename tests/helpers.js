@@ -121,6 +121,10 @@ function buildApp() {
   }
   app.use("/api/tasks", require("../routes/taskRoutes"));
   app.use("/api/finance", require("../routes/financeRoutes"));
+  app.use("/api/games", require("../routes/gameRoutes"));
+  app.use("/api/auth", require("../routes/authRoutes"));
+  app.use("/api/admin-center", require("../routes/adminCenterRoutes"));
+  app.use("/api/revenuecat", require("../routes/revenuecatRoutes"));
   for (const [path, file] of extraRoutes) app.use(path, require(file));
   return app;
 }
@@ -130,12 +134,12 @@ const extraRoutes = [];
 const addRoutes = (path, file) => extraRoutes.push([path, file]);
 
 /** HTTP API + Socket.IO (same handler as production) on a random port. */
-async function startServer() {
+async function startServer({ socketOptions } = {}) {
   const http = require("http");
   const { Server } = require("socket.io");
   const server = http.createServer(buildApp());
   const io = new Server(server);
-  require("../sockets/socketHandler").initializeSocket(io);
+  require("../sockets/socketHandler").initializeSocket(io, socketOptions);
   require("../services/realtime").setIo(io);
   server.listen(0);
   await new Promise((r) => server.once("listening", r));

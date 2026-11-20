@@ -40,7 +40,21 @@ const requireFeature = (feature) => [
   (req, res, next) => (req.entitlement.features.includes(feature) ? next() : deny(res, "Your plan doesn't include this feature.")),
 ];
 
-const requireRole = (role) => (req, res, next) =>
-  req.user?.role === role ? next() : res.status(403).json({ success: false, message: "Access denied." });
+/**
+ * Platform role check. "admin" is granted by the older users.role = 'admin' and by the admin
+ * control center roles super_admin / admin (admin_users), so one admin area works for both.
+ */
+const requireRole = (role) => async (req, res, next) => {
+  try {
+    if (req.user?.role === role) return next();
+    if (role === "admin" && req.user) {
+      const { roleOf } = require("../services/adminRoles");
+      if (["super_admin", "admin"].includes(await roleOf(req.user._id))) return next();
+    }
+    res.status(403).json({ success: false, message: "Access denied." });
+  } catch (error) {
+    next(error);
+  }
+};
 
 module.exports = { loadEntitlement, requireSubscription, requirePlan, requireFeature, requireRole };

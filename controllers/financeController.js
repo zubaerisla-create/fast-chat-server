@@ -254,38 +254,165 @@ exports.getSubscription = async (req, res, next) => {
 };
 
 // POST /api/finance/subscription/sync
+// The app calls this after a Google Play purchase / restore. Whatever the body says is ignored:
+// access comes only from RevenueCat's record for this account (server secret key).
 exports.syncSubscription = async (req, res, next) => {
   try {
-    const { plan, revenuecatCustomerId, originalTransactionId, currentPeriodEnd, status } = req.body;
-    const sub = await FinanceSubscription.syncPurchase(req.user.id, {
-      plan,
-      revenuecatCustomerId,
-      originalTransactionId,
-      currentPeriodEnd,
-      status: status || "active",
-    });
-    res.json({ success: true, subscription: sub, message: "Subscription synced successfully." });
+    const revenuecat = require("../services/revenuecat");
+    if (!revenuecat.isConfigured()) {
+      return res.status(503).json({ success: false, code: "billing_unavailable", message: "Purchases are not available yet." });
+    }
+    const sub = await revenuecat.reconcileFinance(req.user.id);
+    res.json({ success: true, subscription: sub, message: "Subscription checked with Google Play." });
+  } catch (err) {
+    if (err.code === "billing_upstream" || err.name === "TimeoutError") {
+      return res.status(502).json({ success: false, code: "billing_upstream", message: "Could not reach the purchase service. Try again." });
+    }
+    next(err);
+  }
+};
+
+// POST /api/finance/revenuecat-webhook — same handler as /api/revenuecat/webhook (one RevenueCat
+// project, one webhook is enough). Always authenticated; events only trigger a reconcile.
+exports.revenueCatWebhook = async (req, res) => {
+  const revenuecat = require("../services/revenuecat");
+  if (!revenuecat.verifyWebhookAuth(req.headers.authorization)) {
+    return res.status(401).json({ success: false, message: "Unauthorized webhook" });
+  }
+  try {
+    const result = await revenuecat.handleWebhook(req.body);
+    res.json({ success: true, received: true, ...result });
+  } catch (err) {
+    if (err.code === "bad_request") return res.status(400).json({ success: false, message: "Malformed event" });
+    console.error("RevenueCat webhook error:", err.message);
+    res.status(500).json({ success: false });
+  }
+};
+
+// Paid Fast Finance actions (same four the app puts behind the paywall)
+exports.requireFinanceAccess = async (req, res, next) => {
+  try {
+    const sub = await FinanceSubscription.getForUser(req.user.id, req.user.createdAt || req.user.created_at);
+    if (sub.hasAccess) return next();
+    res.status(402).json({ success: false, code: "finance_subscription_required", message: "Your free trial has ended. Subscribe to Fast Finance Pro to continue.", subscription: sub });
   } catch (err) {
     next(err);
   }
 };
 
-// POST /api/finance/revenuecat-webhook
-exports.revenueCatWebhook = async (req, res, next) => {
+// ─── Lifetime & Daily Expenses ────────────────────────────────────────────────
+// GET /api/finance/expenses/analytics
+exports.getLifetimeExpenseAnalytics = async (req, res, next) => {
   try {
-    const authHeader = req.headers.authorization;
-    const expectedSecret = process.env.REVENUECAT_WEBHOOK_AUTH_TOKEN;
-    if (expectedSecret && authHeader !== `Bearer ${expectedSecret}`) {
-      return res.status(401).json({ success: false, message: "Unauthorized webhook" });
-    }
-
-    const event = req.body?.event;
-    if (event) {
-      await FinanceSubscription.handleWebhook(event);
-    }
-    res.json({ success: true, received: true });
+    const analytics = await Finance.getLifetimeExpenseAnalytics(req.user.id);
+    res.json({ success: true, data: analytics, ...analytics });
   } catch (err) {
-    console.error("RevenueCat webhook error:", err);
-    res.status(500).json({ success: false, error: err.message });
+    next(err);
   }
 };
+
+// GET /api/finance/expenses
+exports.listExpenses = async (req, res, next) => {
+  try {
+    const expenses = await Finance.listExpenses(req.user.id, req.query);
+    res.json({ success: true, expenses });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /api/finance/expenses
+exports.createExpense = async (req, res, next) => {
+  try {
+    const { title, amount, category, expenseDate, paymentMethod, note } = req.body;
+    if (!title || !amount || Number(amount) <= 0) {
+      return res.status(400).json({ success: false, message: "Valid title and positive amount are required." });
+    }
+    const expense = await Finance.createExpense(req.user.id, {
+      title,
+      amount,
+      category,
+      expenseDate,
+      paymentMethod,
+      note,
+    });
+    res.status(201).json({ success: true, expense, message: "Expense logged successfully." });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// DELETE /api/finance/expenses/:id
+exports.deleteExpense = async (req, res, next) => {
+  try {
+    const ok = await Finance.deleteExpense(req.user.id, req.params.id);
+    if (!ok) return res.status(404).json({ success: false, message: "Expense record not found." });
+    res.json({ success: true, message: "Expense record deleted." });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── Lifetime & Daily Incomes ─────────────────────────────────────────────────
+// GET /api/finance/incomes/analytics
+exports.getLifetimeIncomeAnalytics = async (req, res, next) => {
+  try {
+    const analytics = await Finance.getLifetimeIncomeAnalytics(req.user.id);
+    res.json({ success: true, data: analytics, ...analytics });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// GET /api/finance/incomes
+exports.listIncomes = async (req, res, next) => {
+  try {
+    const incomes = await Finance.listIncomes(req.user.id, req.query);
+    res.json({ success: true, incomes });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /api/finance/incomes
+exports.createIncome = async (req, res, next) => {
+  try {
+    const { title, amount, sourceCategory, incomeDate, paymentMethod, note } = req.body;
+    if (!title || !amount || Number(amount) <= 0) {
+      return res.status(400).json({ success: false, message: "Valid title and positive amount are required." });
+    }
+    const income = await Finance.createIncome(req.user.id, {
+      title,
+      amount,
+      sourceCategory,
+      incomeDate,
+      paymentMethod,
+      note,
+    });
+    res.status(201).json({ success: true, income, message: "Income logged successfully." });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// DELETE /api/finance/incomes/:id
+exports.deleteIncome = async (req, res, next) => {
+  try {
+    const ok = await Finance.deleteIncome(req.user.id, req.params.id);
+    if (!ok) return res.status(404).json({ success: false, message: "Income record not found." });
+    res.json({ success: true, message: "Income record deleted." });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// GET /api/finance/lifetime/summary
+exports.getLifetimeFinancialSummary = async (req, res, next) => {
+  try {
+    const summary = await Finance.getLifetimeFinancialSummary(req.user.id);
+    res.json({ success: true, data: summary, ...summary });
+  } catch (err) {
+    next(err);
+  }
+};
+

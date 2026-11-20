@@ -23,6 +23,7 @@ const CATEGORY_BY_TYPE = {
   task_status: "tasks",
   missed_call: "calls",
   billing: "billing",
+  game_invite: "invitations",
   status_reaction: "status",
 };
 

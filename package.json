@@ -13,6 +13,7 @@
     "agora-access-token": "^2.0.4",
     "apn": "^2.2.0",
     "bcryptjs": "^2.4.3",
+    "chess.js": "^1.4.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "expo-server-sdk": "^6.1.0",

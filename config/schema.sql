@@ -524,4 +524,314 @@ CREATE TABLE IF NOT EXISTS finance_subscriptions (
 );
 CREATE INDEX IF NOT EXISTS finance_subs_user_idx ON finance_subscriptions (user_id);
 
+-- ═══ Lifetime & Daily Expenses ═══
+CREATE TABLE IF NOT EXISTS financial_lifetime_expenses (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id            UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title              VARCHAR(150) NOT NULL,
+  amount             NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+  category           VARCHAR(50) NOT NULL DEFAULT 'Other',
+  expense_date       DATE NOT NULL DEFAULT CURRENT_DATE,
+  payment_method     VARCHAR(50) DEFAULT 'Cash',
+  note               TEXT,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS financial_expenses_user_idx ON financial_lifetime_expenses (user_id);
+CREATE INDEX IF NOT EXISTS financial_expenses_date_idx ON financial_lifetime_expenses (expense_date DESC);
+CREATE INDEX IF NOT EXISTS financial_expenses_category_idx ON financial_lifetime_expenses (category);
 
+-- ═══ Lifetime & Daily Incomes ═══
+CREATE TABLE IF NOT EXISTS financial_lifetime_incomes (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id            UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title              VARCHAR(150) NOT NULL,
+  amount             NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+  source_category    VARCHAR(50) NOT NULL DEFAULT 'Salary',
+  income_date        DATE NOT NULL DEFAULT CURRENT_DATE,
+  payment_method     VARCHAR(50) DEFAULT 'Cash',
+  note               TEXT,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS financial_incomes_user_idx ON financial_lifetime_incomes (user_id);
+CREATE INDEX IF NOT EXISTS financial_incomes_date_idx ON financial_lifetime_incomes (income_date DESC);
+CREATE INDEX IF NOT EXISTS financial_incomes_source_idx ON financial_lifetime_incomes (source_category);
+
+
+
+
+-- ═══ Mini games: finished multiplayer matches (Dots & Boxes, Hangman, Connect Four) ═══
+-- Live game state is kept in memory by services/games/rooms.js; one row is written per finished match.
+CREATE TABLE IF NOT EXISTS game_matches (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  game        VARCHAR(20) NOT NULL CHECK (game IN ('connect4', 'dots', 'hangman')),
+  room_id     UUID NOT NULL,
+  player_a    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  player_b    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  winner_id   UUID REFERENCES users(id) ON DELETE SET NULL,
+  reason      VARCHAR(20) NOT NULL DEFAULT 'normal',
+  score_a     INTEGER NOT NULL DEFAULT 0,
+  score_b     INTEGER NOT NULL DEFAULT 0,
+  moves       INTEGER NOT NULL DEFAULT 0,
+  options     JSONB NOT NULL DEFAULT '{}'::jsonb,
+  started_at  TIMESTAMPTZ NOT NULL,
+  ended_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CHECK (player_a <> player_b)
+);
+CREATE INDEX IF NOT EXISTS game_matches_player_a_idx ON game_matches (player_a, game);
+CREATE INDEX IF NOT EXISTS game_matches_player_b_idx ON game_matches (player_b, game);
+
+-- ═══ Mini games v2: chess & carrom, match lifecycle, invitations, action log (2026-11-20) ═══
+-- Additive only. Existing rows keep working: they are finished matches, so status defaults to 'completed'.
+ALTER TABLE game_matches DROP CONSTRAINT IF EXISTS game_matches_game_check;
+ALTER TABLE game_matches ADD CONSTRAINT game_matches_game_check CHECK (game IN ('connect4', 'dots', 'hangman', 'chess', 'carrom'));
+ALTER TABLE game_matches ADD COLUMN IF NOT EXISTS match_no INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE game_matches ADD COLUMN IF NOT EXISTS status VARCHAR(24) NOT NULL DEFAULT 'completed';
+ALTER TABLE game_matches DROP CONSTRAINT IF EXISTS game_matches_status_check;
+ALTER TABLE game_matches ADD CONSTRAINT game_matches_status_check CHECK (status IN ('waiting_for_players', 'in_progress', 'completed', 'cancelled', 'abandoned'));
+ALTER TABLE game_matches ADD COLUMN IF NOT EXISTS result_detail JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE game_matches ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
+-- A running match has no end yet
+ALTER TABLE game_matches ALTER COLUMN ended_at DROP NOT NULL;
+-- One row per match of a room (a rematch is a new match_no): prevents duplicate match records.
+-- Older rows of rematches share room_id with match_no 0, so number them once, before the index exists.
+UPDATE game_matches m SET match_no = r.n - 1
+  FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY room_id ORDER BY started_at, ended_at, id) AS n FROM game_matches) r
+ WHERE m.id = r.id
+   AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'game_matches_room_match_idx');
+CREATE UNIQUE INDEX IF NOT EXISTS game_matches_room_match_idx ON game_matches (room_id, match_no);
+CREATE INDEX IF NOT EXISTS game_matches_status_idx ON game_matches (status) WHERE status IN ('waiting_for_players', 'in_progress');
+
+-- Invitations (live copy in memory; this is the record): invited → accepted | declined | expired | cancelled
+CREATE TABLE IF NOT EXISTS game_invitations (
+  id            UUID PRIMARY KEY,
+  game          VARCHAR(20) NOT NULL,
+  from_user     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  to_user       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  options       JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status        VARCHAR(12) NOT NULL DEFAULT 'invited' CHECK (status IN ('invited', 'accepted', 'declined', 'expired', 'cancelled')),
+  room_id       UUID,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at    TIMESTAMPTZ NOT NULL,
+  responded_at  TIMESTAMPTZ,
+  CHECK (from_user <> to_user)
+);
+CREATE INDEX IF NOT EXISTS game_invitations_to_idx ON game_invitations (to_user, created_at DESC);
+CREATE INDEX IF NOT EXISTS game_invitations_from_idx ON game_invitations (from_user, created_at DESC);
+CREATE INDEX IF NOT EXISTS game_invitations_pending_idx ON game_invitations (status) WHERE status = 'invited';
+
+-- Every accepted move / shot / resign / draw or take-back answer, in order (chess & carrom)
+CREATE TABLE IF NOT EXISTS game_match_actions (
+  id          BIGSERIAL PRIMARY KEY,
+  match_id    UUID NOT NULL REFERENCES game_matches(id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  player_id   UUID REFERENCES users(id) ON DELETE SET NULL,
+  action      JSONB NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (match_id, seq)
+);
+
+-- ═══ Games Lifetime, accounts & admin control center (2026-11-20) ═══
+-- Additive only; existing rows keep working with the defaults below.
+
+-- Account state, sessions and password resets (email + password, no OTP)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(12) NOT NULL DEFAULT 'active';
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check;
+ALTER TABLE users ADD CONSTRAINT users_status_check CHECK (status IN ('active', 'suspended'));
+ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_reason VARCHAR(300);
+-- Tokens issued before this moment are rejected (log out everywhere / password change)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS sessions_revoked_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind          VARCHAR(10) NOT NULL DEFAULT 'app' CHECK (kind IN ('app', 'web', 'admin')),
+  device_name   VARCHAR(120),
+  platform      VARCHAR(20),
+  user_agent    VARCHAR(300),
+  ip            VARCHAR(64),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_used_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at    TIMESTAMPTZ NOT NULL,
+  revoked_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS user_sessions_user_idx ON user_sessions (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS user_sessions_active_idx ON user_sessions (user_id) WHERE revoked_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash  CHAR(64) NOT NULL UNIQUE, -- sha256 of the random token; the token itself is only in the email
+  expires_at  TIMESTAMPTZ NOT NULL,
+  used_at     TIMESTAMPTZ,
+  ip          VARCHAR(64),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS password_reset_tokens_user_idx ON password_reset_tokens (user_id, created_at DESC);
+
+-- One row per user per UTC day they used the API (DAU / MAU)
+CREATE TABLE IF NOT EXISTS user_activity_days (
+  user_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  day      DATE NOT NULL,
+  PRIMARY KEY (user_id, day)
+);
+CREATE INDEX IF NOT EXISTS user_activity_days_day_idx ON user_activity_days (day);
+
+-- Admin control center roles (users.role = 'admin' keeps working for the existing website admin)
+CREATE TABLE IF NOT EXISTS admin_users (
+  user_id     UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  role        VARCHAR(20) NOT NULL CHECK (role IN ('super_admin', 'admin', 'support', 'game_manager', 'analyst')),
+  granted_by  UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS admin_audit_logs (
+  id           BIGSERIAL PRIMARY KEY,
+  admin_id     UUID REFERENCES users(id) ON DELETE SET NULL,
+  action       VARCHAR(60) NOT NULL,
+  target_type  VARCHAR(30) NOT NULL,
+  target_id    VARCHAR(120),
+  previous     JSONB,
+  next         JSONB,
+  reason       VARCHAR(500),
+  ip           VARCHAR(64),
+  user_agent   VARCHAR(300),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS admin_audit_logs_created_idx ON admin_audit_logs (created_at DESC);
+CREATE INDEX IF NOT EXISTS admin_audit_logs_target_idx ON admin_audit_logs (target_type, target_id);
+
+CREATE TABLE IF NOT EXISTS admin_notifications (
+  id          BIGSERIAL PRIMARY KEY,
+  kind        VARCHAR(40) NOT NULL,
+  title       VARCHAR(200) NOT NULL,
+  body        VARCHAR(1000),
+  data        JSONB NOT NULL DEFAULT '{}',
+  read_at     TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS admin_notifications_created_idx ON admin_notifications (created_at DESC);
+
+-- Game catalog (seeded from config/games.js; admin edits persist here)
+CREATE TABLE IF NOT EXISTS game_registry (
+  id            VARCHAR(32) PRIMARY KEY CHECK (id ~ '^[a-z0-9_]{2,32}$'),
+  name          VARCHAR(60) NOT NULL,
+  description   VARCHAR(300) NOT NULL DEFAULT '',
+  icon          VARCHAR(60) NOT NULL DEFAULT 'game-controller-outline',
+  status        VARCHAR(12) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'hidden', 'maintenance', 'disabled')),
+  sort_order    INTEGER NOT NULL DEFAULT 100,
+  modes         JSONB NOT NULL DEFAULT '[]',
+  multiplayer   BOOLEAN NOT NULL DEFAULT FALSE,
+  ai            BOOLEAN NOT NULL DEFAULT FALSE,
+  -- { featureId: { label, tier: 'free' | 'premium', enabled } }
+  features      JSONB NOT NULL DEFAULT '{}',
+  config        JSONB NOT NULL DEFAULT '{}',
+  builtin       BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  key         VARCHAR(60) PRIMARY KEY,
+  value       JSONB NOT NULL,
+  updated_by  UUID REFERENCES users(id) ON DELETE SET NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Universal entitlements (games_lifetime). Sources are independent: a refund only touches the
+-- 'revenuecat' row, an admin revoke only 'promo'; 'owner' rows are protected by a trigger.
+CREATE TABLE IF NOT EXISTS user_entitlements (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  entitlement    VARCHAR(40) NOT NULL,
+  source         VARCHAR(12) NOT NULL CHECK (source IN ('revenuecat', 'promo', 'owner')),
+  status         VARCHAR(10) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+  reference      VARCHAR(200),
+  note           VARCHAR(500),
+  granted_by     UUID REFERENCES users(id) ON DELETE SET NULL,
+  granted_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  revoked_at     TIMESTAMPTZ,
+  revoked_by     UUID REFERENCES users(id) ON DELETE SET NULL,
+  revoke_reason  VARCHAR(500),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, entitlement, source)
+);
+CREATE INDEX IF NOT EXISTS user_entitlements_active_idx ON user_entitlements (entitlement, status);
+
+CREATE OR REPLACE FUNCTION protect_owner_entitlement() RETURNS trigger AS $$
+BEGIN
+  IF OLD.source = 'owner' AND current_setting('fastchat.allow_owner_change', true) IS DISTINCT FROM 'on' THEN
+    IF TG_OP = 'DELETE' OR NEW.status <> 'active' OR NEW.source <> 'owner' OR NEW.user_id <> OLD.user_id THEN
+      RAISE EXCEPTION 'owner entitlement is protected';
+    END IF;
+  END IF;
+  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS user_entitlements_owner_guard ON user_entitlements;
+CREATE TRIGGER user_entitlements_owner_guard BEFORE UPDATE OR DELETE ON user_entitlements
+  FOR EACH ROW EXECUTE FUNCTION protect_owner_entitlement();
+
+-- Google Play purchases as reported by RevenueCat (never created by hand)
+CREATE TABLE IF NOT EXISTS purchase_records (
+  id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                UUID REFERENCES users(id) ON DELETE SET NULL,
+  rc_app_user_id         VARCHAR(120) NOT NULL,
+  product_id             VARCHAR(120) NOT NULL,
+  store                  VARCHAR(30) NOT NULL DEFAULT 'PLAY_STORE',
+  store_transaction_id   VARCHAR(200) NOT NULL UNIQUE,
+  environment            VARCHAR(12) NOT NULL DEFAULT 'PRODUCTION',
+  price                  NUMERIC(12,2),
+  currency               VARCHAR(8),
+  price_usd              NUMERIC(12,2),
+  status                 VARCHAR(12) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'refunded', 'revoked', 'transferred')),
+  purchased_at           TIMESTAMPTZ NOT NULL,
+  refunded_at            TIMESTAMPTZ,
+  raw                    JSONB NOT NULL DEFAULT '{}',
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS purchase_records_user_idx ON purchase_records (user_id);
+CREATE INDEX IF NOT EXISTS purchase_records_purchased_idx ON purchase_records (purchased_at DESC);
+
+CREATE TABLE IF NOT EXISTS revenuecat_webhook_events (
+  id            VARCHAR(120) PRIMARY KEY, -- RevenueCat event id: makes delivery idempotent
+  type          VARCHAR(40) NOT NULL,
+  app_user_id   VARCHAR(120),
+  environment   VARCHAR(12),
+  payload       JSONB NOT NULL,
+  status        VARCHAR(10) NOT NULL DEFAULT 'received' CHECK (status IN ('received', 'processed', 'ignored', 'failed')),
+  error         VARCHAR(500),
+  received_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  processed_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS revenuecat_webhook_events_received_idx ON revenuecat_webhook_events (received_at DESC);
+
+-- Global (all games) daily online match creations per user, UTC days
+CREATE TABLE IF NOT EXISTS global_daily_match_usage (
+  user_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  day      DATE NOT NULL,
+  count    INTEGER NOT NULL DEFAULT 0 CHECK (count >= 0),
+  PRIMARY KEY (user_id, day)
+);
+
+-- Player reports about a match (abuse, cheating, …) for admin review
+CREATE TABLE IF NOT EXISTS game_reports (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  reporter_id  UUID REFERENCES users(id) ON DELETE SET NULL,
+  reported_id  UUID REFERENCES users(id) ON DELETE SET NULL,
+  game         VARCHAR(32) NOT NULL,
+  room_id      UUID,
+  reason       VARCHAR(30) NOT NULL CHECK (reason IN ('cheating', 'abuse', 'afk', 'bug', 'other')),
+  details      VARCHAR(1000),
+  status       VARCHAR(12) NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'reviewed', 'dismissed')),
+  reviewed_by  UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS game_reports_status_idx ON game_reports (status, created_at DESC);
+
+-- New games may be registered by admins: the game column is no longer limited to the built-ins
+ALTER TABLE game_matches DROP CONSTRAINT IF EXISTS game_matches_game_check;
+ALTER TABLE game_matches ADD CONSTRAINT game_matches_game_check CHECK (game ~ '^[a-z0-9_]{2,32}$');
+CREATE INDEX IF NOT EXISTS game_matches_started_idx ON game_matches (started_at DESC);

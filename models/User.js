@@ -22,6 +22,9 @@ const fromRow = (row) =>
     fcmToken: row.fcm_token,
     apnsVoipToken: row.apns_voip_token,
     role: row.role,
+    status: row.status || "active",
+    suspendedReason: row.suspended_reason || null,
+    sessionsRevokedAt: row.sessions_revoked_at || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
