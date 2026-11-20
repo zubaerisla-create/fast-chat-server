@@ -40,6 +40,10 @@ const withTransaction = async (fn) => {
  * Retries for a while so the API can start before the database container is ready.
  * Exits process on failure to prevent running without a database.
  */
+/** Resolves once connectDB() has applied schema.sql (startup jobs that need new tables wait for it). */
+let markSchemaReady;
+const schemaReady = new Promise((resolve) => (markSchemaReady = resolve));
+
 const connectDB = async ({ retries = 15, delayMs = 2000 } = {}) => {
   const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
 
@@ -48,6 +52,7 @@ const connectDB = async ({ retries = 15, delayMs = 2000 } = {}) => {
       await pool.query(schema);
       const { rows } = await pool.query("SELECT current_database() AS db");
       console.log(`✅ PostgreSQL connected: ${rows[0].db}`);
+      markSchemaReady();
       return;
     } catch (error) {
       console.error(`❌ PostgreSQL connection attempt ${attempt}/${retries} failed: ${error.message}`);
@@ -57,4 +62,4 @@ const connectDB = async ({ retries = 15, delayMs = 2000 } = {}) => {
   }
 };
 
-module.exports = { pool, query, withTransaction, connectDB };
+module.exports = { pool, query, withTransaction, connectDB, schemaReady };

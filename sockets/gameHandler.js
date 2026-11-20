@@ -72,7 +72,10 @@ function initializeGames(io, options) {
   rooms = createGameRooms(io, options);
   // Rooms live in memory: anything left open by a previous process can't be resumed
   const bootedAt = new Date();
-  Promise.all([GameMatch.abandonStale(bootedAt), GameInvitation.expireStale(bootedAt)]).catch((err) => console.error("[Games] cleanup failed:", err.message));
+  // Wait for the schema (first start after an upgrade creates these tables)
+  require("../config/db")
+    .schemaReady.then(() => Promise.all([GameMatch.abandonStale(bootedAt), GameInvitation.expireStale(bootedAt)]))
+    .catch((err) => console.error("[Games] cleanup failed:", err.message));
   const sweeper = setInterval(() => rooms.sweep(), 60000);
   sweeper.unref?.();
   return rooms;
