@@ -159,3 +159,15 @@ test("trial users can still use the paid actions", async () => {
   const res = await srv.call("POST", "/api/finance/goals", { token: user.token, body: { title: "Trip", targetAmount: 50 } });
   assert.equal(res.status, 201);
 });
+
+test("lifetime summary subtracts expenses (net and this-month net go negative)", async () => {
+  let res = await srv.call("POST", "/api/finance/expenses", { token: user.token, body: { title: "Lunch", amount: 200, category: "Food & Dining" } });
+  assert.equal(res.status, 201);
+  res = await srv.call("POST", "/api/finance/incomes", { token: user.token, body: { title: "Gift", amount: 50, source: "Other" } });
+  assert.ok([200, 201].includes(res.status), JSON.stringify(res.body));
+  const sum = (await srv.call("GET", "/api/finance/lifetime/summary", { token: user.token })).body.data;
+  assert.equal(sum.lifetimeExpense, 200);
+  assert.equal(sum.lifetimeIncome, 50);
+  assert.equal(sum.netLifetime, -150);
+  assert.equal(sum.thisMonthNet, -150);
+});

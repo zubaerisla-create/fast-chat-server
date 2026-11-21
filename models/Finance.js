@@ -1020,20 +1020,22 @@ async function getLifetimeFinancialSummary(userId) {
     getLifetimeIncomeAnalytics(userId),
   ]);
 
+  // Expense analytics nests its totals under `totals` (income analytics doesn't)
+  const exp = expenseData.totals || expenseData;
   const lifetimeIncome = incomeData.lifetimeTotal || 0;
-  const lifetimeExpense = expenseData.lifetimeTotal || 0;
+  const lifetimeExpense = exp.lifetimeTotal || 0;
   const netLifetime = Number((lifetimeIncome - lifetimeExpense).toFixed(2));
 
   const thisMonthIncome = incomeData.thisMonthTotal || 0;
-  const thisMonthExpense = expenseData.thisMonthTotal || 0;
+  const thisMonthExpense = exp.thisMonthTotal || 0;
   const thisMonthNet = Number((thisMonthIncome - thisMonthExpense).toFixed(2));
 
   const thisYearIncome = incomeData.thisYearTotal || 0;
-  const thisYearExpense = expenseData.thisYearTotal || 0;
+  const thisYearExpense = exp.thisYearTotal || 0;
   const thisYearNet = Number((thisYearIncome - thisYearExpense).toFixed(2));
 
   const todayIncome = incomeData.todayTotal || 0;
-  const todayExpense = expenseData.todayTotal || 0;
+  const todayExpense = exp.todayTotal || 0;
   const todayNet = Number((todayIncome - todayExpense).toFixed(2));
 
   const savingsRate = lifetimeIncome > 0

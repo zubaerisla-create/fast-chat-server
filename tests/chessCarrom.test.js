@@ -189,6 +189,18 @@ test("carrom physics: equal coins exchange momentum head-on; the heavier striker
   assert.ok(r.strikerEnd.y < P.BASE_Y[0] - 100);
 });
 
+test("carrom physics: shooting back towards your own side bounces off your cushion and can pocket coins behind the baseline", () => {
+  const back = P.simulate([], { seat: 0, x: 370, dx: 0, dy: 1, power: 1 });
+  assert.ok(back.events.some((e) => e.type === "wall"));
+  assert.ok(back.strikerEnd.y > 0 && back.strikerEnd.y < P.BOARD && back.strikerEnd.x > 0 && back.strikerEnd.x < P.BOARD);
+  // Coin between the baseline and seat 0's bottom-right pocket
+  const [px, py] = [716, 716];
+  const sx = 560, sy = P.BASE_Y[0];
+  const l = Math.hypot(px - sx, py - sy);
+  const r = P.simulate([{ id: 1, x: sx + 0.6 * (px - sx), y: sy + 0.6 * (py - sy) }], { seat: 0, x: sx, dx: (px - sx) / l, dy: (py - sy) / l, power: 0.45 });
+  assert.ok(r.events.some((e) => e.type === "pocket" && e.a === 1), "coin behind the baseline pocketed");
+});
+
 test("carrom physics: cushions bounce, friction stops everything, nothing leaves the board", () => {
   const r = P.simulate([], { seat: 0, x: 370, dx: 1, dy: -1, power: 0.7 });
   assert.ok(r.events.some((e) => e.type === "wall"));
@@ -379,7 +391,8 @@ test("carrom rules: board points, queen bonus, multi-board matches and shot vali
   const v = liveCarrom();
   const ok = { type: "shoot", x: 370, dx: 0, dy: -1, power: 0.5 };
   assert.equal(carrom.applyMove(v, 1, ok, 1), "not_your_turn");
-  assert.equal(carrom.applyMove(v, 0, { ...ok, dy: 1 }, 1), "shot_backwards");
+  // Shooting back towards your own side (downwards for seat 0) is allowed
+  assert.equal(carrom.validateShot(v, 0, { x: 370, dx: 0.3, dy: 1, power: 0.5 }), null);
   assert.equal(carrom.applyMove(v, 0, { ...ok, x: 50 }, 1), "invalid_shot");
   assert.equal(carrom.applyMove(v, 0, { ...ok, power: 5 }, 1), "invalid_shot");
   assert.equal(carrom.applyMove(v, 0, { ...ok, x: NaN }, 1), "invalid_shot");

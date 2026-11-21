@@ -214,9 +214,7 @@ function validateShot(state, seat, move) {
   if (power < P.MIN_POWER || power > 1) return "invalid_shot";
   const len = Math.sqrt(dx * dx + dy * dy);
   if (len < 1e-6) return "invalid_shot";
-  // Shots must go forward, away from your own baseline (at least ~6°)
-  const forward = (seat === 0 ? -dy : dy) / len;
-  if (forward < 0.1) return "shot_backwards";
+  // Any direction is allowed, including back towards your own side (bank shots, coins behind the baseline)
   if (P.strikerBlocked(state.pieces, seat, x)) return "striker_blocked";
   return null;
 }

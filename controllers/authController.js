@@ -122,6 +122,10 @@ const register = async (req, res, next) => {
     if (password.length > 128) {
       return badRequest(res, "Password is too long (128 characters at most).");
     }
+    // Email verification code (POST /send-otp) is required unless SIGNUP_OTP_REQUIRED=false
+    if (!otp && process.env.SIGNUP_OTP_REQUIRED !== "false") {
+      return badRequest(res, "Enter the 6-digit code we emailed you.");
+    }
     if (otp) {
       const check = await OTP.verify(email, "register", otp);
       if (!check.ok) return badRequest(res, check.message);

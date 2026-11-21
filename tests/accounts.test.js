@@ -5,6 +5,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const h = require("./helpers");
+process.env.SIGNUP_OTP_REQUIRED = "false"; // these tests cover accounts without the email-code step
 
 let srv;
 test.before(async () => {
