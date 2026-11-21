@@ -21,7 +21,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const config = () => ({
   apiBase: (process.env.REVENUECAT_API_BASE || "https://api.revenuecat.com").replace(/\/$/, ""),
-  secretKey: process.env.REVENUECAT_SECRET_KEY || "",
+  secretKey: process.env.REVENUECAT_SECRET_KEY || process.env.REVENUECAT_SECRET_API_KEY || "",
   // REVENUECAT_WEBHOOK_AUTH_TOKEN is the older name used by the Finance webhook
   webhookAuth: process.env.REVENUECAT_WEBHOOK_AUTH || process.env.REVENUECAT_WEBHOOK_AUTH_TOKEN || "",
   productId: process.env.REVENUECAT_PRODUCT_ID || REVENUECAT.productId,

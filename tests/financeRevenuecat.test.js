@@ -171,3 +171,16 @@ test("lifetime summary subtracts expenses (net and this-month net go negative)",
   assert.equal(sum.netLifetime, -150);
   assert.equal(sum.thisMonthNet, -150);
 });
+
+test("the secret key is also read from REVENUECAT_SECRET_API_KEY", async () => {
+  delete process.env.REVENUECAT_SECRET_KEY;
+  process.env.REVENUECAT_SECRET_API_KEY = "sk_test_secret";
+  try {
+    subscribers.set(user.id, financeEnt("finance_lifetime_100", null));
+    const res = await srv.call("POST", "/api/finance/subscription/sync", { token: user.token });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.subscription.status, "lifetime");
+  } finally {
+    delete process.env.REVENUECAT_SECRET_API_KEY;
+  }
+});
