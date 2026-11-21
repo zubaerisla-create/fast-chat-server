@@ -835,3 +835,9 @@ CREATE INDEX IF NOT EXISTS game_reports_status_idx ON game_reports (status, crea
 ALTER TABLE game_matches DROP CONSTRAINT IF EXISTS game_matches_game_check;
 ALTER TABLE game_matches ADD CONSTRAINT game_matches_game_check CHECK (game ~ '^[a-z0-9_]{2,32}$');
 CREATE INDEX IF NOT EXISTS game_matches_started_idx ON game_matches (started_at DESC);
+
+-- ═══ Fast Finance: no automatic sign-up trial for new accounts (2026-11-21) ═══
+-- Accounts created after this moment get Pro only through Google Play (Monthly has a 7-day free
+-- trial offer there). Inserted once, on the first start of this version, so the cutoff is the
+-- deploy time; later starts keep it. Existing finance_subscriptions rows are never changed.
+INSERT INTO app_settings (key, value) VALUES ('finance_signup_trial_cutoff', to_jsonb(NOW())) ON CONFLICT (key) DO NOTHING;

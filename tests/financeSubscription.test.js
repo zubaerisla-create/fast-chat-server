@@ -17,6 +17,8 @@ test.after(async () => {
 
 test.beforeEach(async () => {
   await h.resetDb();
+  // These suites cover the pre-cutoff (automatic sign-up trial) rule
+  await h.query(`INSERT INTO app_settings (key, value) VALUES ('finance_signup_trial_cutoff', to_jsonb('2999-01-01T00:00:00Z'::text)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
   user = await h.createUser("finance_test_user");
 });
 
@@ -27,8 +29,9 @@ test("finance subscription pricing is configured with 7-day trial, monthly $10, 
   assert.equal(FINANCE_PRICING.lifetime.price, 100);
 });
 
-test("new user receives active 7-day free trial", async () => {
-  const access = await FinanceSubscription.getForUser(user.id, user.created_at);
+test("an account from before the cutoff receives the 7-day sign-up trial", async () => {
+  const { rows } = await h.query("SELECT created_at FROM users WHERE id = $1", [user.id]);
+  const access = await FinanceSubscription.getForUser(user.id, rows[0].created_at);
   assert.equal(access.hasAccess, true);
   assert.equal(access.isTrial, true);
   assert.ok(access.daysLeft >= 6 && access.daysLeft <= 7);

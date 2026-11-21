@@ -41,6 +41,8 @@ test.beforeEach(async () => {
   subscribers.clear();
   process.env.REVENUECAT_SECRET_KEY = "sk_test_secret";
   process.env.REVENUECAT_API_BASE = `http://127.0.0.1:${stub.address().port}`;
+  // These suites cover the pre-cutoff (automatic sign-up trial) rule
+  await h.query(`INSERT INTO app_settings (key, value) VALUES ('finance_signup_trial_cutoff', to_jsonb('2999-01-01T00:00:00Z'::text)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
   user = await h.createUser("fin_buyer");
 });
 

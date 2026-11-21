@@ -8,7 +8,20 @@ const FINANCE_PRICING = {
 
 class FinanceSubscription {
   /**
-   * Get or initialize subscription status for user (with 7-day free trial)
+   * Accounts created before this moment keep the old automatic 7-day sign-up trial; newer ones
+   * start without a trial (Google Play's Monthly plan has the trial). Set once at deploy time
+   * (config/schema.sql). Missing → nobody gets the automatic trial.
+   */
+  static async signupTrialCutoff() {
+    const { rows } = await pool.query(`SELECT value FROM app_settings WHERE key = 'finance_signup_trial_cutoff'`);
+    const v = rows[0] && rows[0].value;
+    const d = v ? new Date(v) : null;
+    return d && !Number.isNaN(d.getTime()) ? d : null;
+  }
+
+  /**
+   * Get the user's Finance subscription row, creating it the first time.
+   * Existing rows are returned as they are (a running trial keeps its end date).
    */
   static async getForUser(userId, userCreatedAt = null) {
     const res = await pool.query(
@@ -20,17 +33,30 @@ class FinanceSubscription {
     const now = new Date();
 
     if (!sub) {
-      // Initialize with 7-day free trial from user registration (or now)
-      const trialStart = userCreatedAt ? new Date(userCreatedAt) : now;
-      const trialEnd = new Date(trialStart.getTime() + 7 * 24 * 60 * 60 * 1000);
-
-      const ins = await pool.query(
-        `INSERT INTO finance_subscriptions (
-          user_id, trial_starts_at, trial_ends_at, status
-        ) VALUES ($1, $2, $3, 'trialing')
-        RETURNING *`,
-        [userId, trialStart.toISOString(), trialEnd.toISOString()]
-      );
+      const cutoff = await this.signupTrialCutoff();
+      const created = userCreatedAt ? new Date(userCreatedAt) : null;
+      const legacyTrial = cutoff && created && !Number.isNaN(created.getTime()) && created < cutoff;
+      let ins;
+      if (legacyTrial) {
+        // Account from before the cutoff: the old rule, 7 days from registration
+        const trialEnd = new Date(created.getTime() + 7 * 24 * 60 * 60 * 1000);
+        ins = await pool.query(
+          `INSERT INTO finance_subscriptions (user_id, trial_starts_at, trial_ends_at, status)
+           VALUES ($1, $2, $3, 'trialing')
+           ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
+           RETURNING *`,
+          [userId, created.toISOString(), trialEnd.toISOString()]
+        );
+      } else {
+        // New account: no automatic trial (start = end), Pro only via Google Play
+        ins = await pool.query(
+          `INSERT INTO finance_subscriptions (user_id, trial_starts_at, trial_ends_at, status)
+           VALUES ($1, $2, $2, 'free')
+           ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
+           RETURNING *`,
+          [userId, now.toISOString()]
+        );
+      }
       sub = ins.rows[0];
     }
 
@@ -45,6 +71,7 @@ class FinanceSubscription {
     const trialEnds = new Date(sub.trial_ends_at);
     const periodEnds = sub.current_period_end ? new Date(sub.current_period_end) : null;
 
+    const hadTrial = new Date(sub.trial_ends_at) > new Date(sub.trial_starts_at);
     let hasAccess = false;
     let isTrial = false;
     let daysLeft = 0;
@@ -71,12 +98,14 @@ class FinanceSubscription {
         daysLeft = Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
       } else {
         hasAccess = false;
-        effectiveStatus = "expired";
+        // Never had a trial → "free" (not "expired")
+        effectiveStatus = hadTrial ? "expired" : "free";
       }
     }
 
     return {
       hasAccess,
+      hadTrial,
       status: effectiveStatus,
       isTrial,
       daysLeft,

@@ -294,7 +294,10 @@ exports.requireFinanceAccess = async (req, res, next) => {
   try {
     const sub = await FinanceSubscription.getForUser(req.user.id, req.user.createdAt || req.user.created_at);
     if (sub.hasAccess) return next();
-    res.status(402).json({ success: false, code: "finance_subscription_required", message: "Your free trial has ended. Subscribe to Fast Finance Pro to continue.", subscription: sub });
+    const message = sub.hadTrial
+      ? "Your free trial has ended. Subscribe to Fast Finance Pro to continue."
+      : "Subscribe to Fast Finance Pro to continue. The Monthly plan starts with a 7-day free trial in Google Play.";
+    res.status(402).json({ success: false, code: "finance_subscription_required", message, subscription: sub });
   } catch (err) {
     next(err);
   }
